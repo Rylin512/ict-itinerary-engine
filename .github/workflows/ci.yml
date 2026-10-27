@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ruff
+        run: python -m pip install --upgrade pip ruff==0.17.3
+      - name: Lint
+        run: ruff check prototype
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run unit tests
+        working-directory: prototype
+        run: python -m unittest discover -s tests -t . -v
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile Python sources
+        run: python -m compileall -q prototype
+      - name: Validate JSON data
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          for path in sorted(Path("prototype").rglob("*.json")):
+              json.loads(path.read_text(encoding="utf-8"))
+              print(f"ok {path}")
+          PY
+      - name: Package prototype
+        run: |
+          cd prototype
+          zip -qr ../ict-itinerary-engine-prototype.zip . \
+            -x '*/__pycache__/*' '*.pyc'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prototype
+          path: ict-itinerary-engine-prototype.zip
+          if-no-files-found: error
