@@ -13,6 +13,8 @@ python serve.py                     # 打开 http://127.0.0.1:8765
 python serve.py --host 0.0.0.0      # 手机同一 WiFi：http://<你的IP>:8765
 ```
 
+另一个入口：**`http://127.0.0.1:8765/travel.html` —— 跨城出行规划页**（`web/travel.html + travel.js + travel.css`，独立于上面的单城编排页）。流程：出发地/目的地 → 交通方式对比（飞机/高铁/普速/自驾/大巴，含时间价格估算与"大多数人选择"标记）→ 地图上勾选景点分布 → 三种排序方案（系统推荐=最省时、大众经典、自定义）+ 每段通勤方式可切换（步行/骑行/公交地铁/打车）→ Leaflet 地图画线 + 高德导航跳转雏形。内置 6 个城市示意数据，成都 14 个景点与本引擎同源，接真实 API 时只需替换 `travel.js` 里的 `intercityOptions / legOpts` 两个估算函数。
+
 ![桌面版](shot-desktop.png)
 
 <img src="shot-mobile.png" width="330" alt="手机版">

@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f5f2ea">
+<title>跨城出行规划 · 原型</title>
+<link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="travel.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="logo">途</div>
+    <div>
+      <h1>跨城出行规划</h1>
+      <p class="sub">出发地 → 交通方式 → 景点分布 → 行程方案 → 地图导航</p>
+    </div>
+  </div>
+  <div class="badges">
+    <span class="badge">华为 ICT 创新赛 · 赛题一</span>
+    <span class="badge ghost">原型 · 示意数据</span>
+    <a class="badge ghost link" href="index.html">↩ 单城编排版</a>
+  </div>
+</header>
+
+<ol class="stepper" id="stepper">
+  <li data-step="1" class="on"><i>1</i>出发 / 到达</li>
+  <li data-step="2"><i>2</i>选交通</li>
+  <li data-step="3"><i>3</i>挑景点</li>
+  <li data-step="4"><i>4</i>行程方案</li>
+  <li data-step="5"><i>5</i>地图导航</li>
+</ol>
+
+<main class="layout">
+  <section class="col left">
+
+    <!-- 步骤 1：出发地 / 目的地 -->
+    <div class="card step" id="card1">
+      <h2>① 从哪里出发，去哪里？</h2>
+      <div class="field-row">
+        <div class="field">
+          <label>出发地</label>
+          <select id="fromSel"></select>
+        </div>
+        <div class="field">
+          <label>目的地</label>
+          <select id="toSel"></select>
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>出发日期</label>
+          <input id="dateInp" type="date">
+        </div>
+        <div class="field">
+          <label>&nbsp;</label>
+          <button id="btnSwap" class="ghost-btn">⇄ 交换出发 / 到达</button>
+        </div>
+      </div>
+      <button id="btnQuery" class="primary">查询交通方式 →</button>
+    </div>
+
+    <!-- 步骤 2：交通方式对比 -->
+    <div class="card step hidden" id="card2">
+      <div class="step-head">
+        <h2>② 怎么过去？</h2>
+        <button class="back" data-goto="1">← 改城市</button>
+      </div>
+      <p class="muted" id="distInfo"></p>
+      <div id="transportList" class="transport-list"></div>
+      <p class="hint">时间与价格按两地距离估算（含往返车站 / 机场的接驳），接入真实票务 API 后替换。</p>
+      <button id="btnTo3" class="primary" disabled>下一步：挑选景点 →</button>
+    </div>
+
+    <!-- 步骤 3：景点分布与选择 -->
+    <div class="card step hidden" id="card3">
+      <div class="step-head">
+        <h2>③ 在 <span id="destName"></span> 玩哪些？</h2>
+        <button class="back" data-goto="2">← 改交通</button>
+      </div>
+      <div class="pool-head">
+        <span id="selInfo" class="muted">已选 0 个 · 游玩约 0 分钟</span>
+        <button id="btnClassic" class="ghost-btn">🔥 一键选入经典组合</button>
+      </div>
+      <div id="spotGrid" class="spot-grid"></div>
+      <p class="hint">右侧地图即景点分布，点地图上的圆点也可以勾选 / 取消；距离为距住宿地的直线距离。</p>
+      <button id="btnPlan" class="primary">生成行程规划 →</button>
+    </div>
+
+    <!-- 步骤 4：行程方案 -->
+    <div class="card step hidden" id="card4">
+      <div class="step-head">
+        <h2>④ 行程方案</h2>
+        <button class="back" data-goto="3">← 改景点</button>
+      </div>
+      <div class="scheme-tabs" id="schemeTabs">
+        <button data-scheme="recommended" class="on">🤖 系统推荐 · 最省时</button>
+        <button data-scheme="popular">🔥 大众经典路线</button>
+        <button data-scheme="custom">✍️ 自定义顺序</button>
+      </div>
+      <p class="muted" id="schemeMeta"></p>
+      <div class="opt-row">
+        <label class="chk"><input type="checkbox" id="chkClosed" checked> 结束返回住宿地</label>
+        <label class="chk"><input type="checkbox" id="chkTicket" checked> 费用计入门票</label>
+      </div>
+      <div class="preset-row">
+        <span class="muted">通勤快捷键：</span>
+        <button class="ghost-btn sm" data-preset="smart">智能组合</button>
+        <button class="ghost-btn sm" data-preset="taxi">全程打车</button>
+        <button class="ghost-btn sm" data-preset="transit">全程公交地铁</button>
+      </div>
+      <div id="timeline" class="timeline"></div>
+      <div id="totals" class="totals"></div>
+      <div class="action-row">
+        <button id="btnCopy" class="ghost-btn">📋 复制行程单</button>
+        <button id="btnTo5" class="primary">地图与导航 →</button>
+      </div>
+    </div>
+
+    <!-- 步骤 5：地图导航 -->
+    <div class="card step hidden" id="card5">
+      <div class="step-head">
+        <h2>⑤ 地图导航（雏形）</h2>
+        <button class="back" data-goto="4">← 改方案</button>
+      </div>
+      <p class="muted">右侧地图已画出整条路线：<b>绿色虚线=步行、橙色虚线=骑行、蓝色=公交地铁、紫色=打车</b>，数字圆点为游玩顺序，🏨 为住宿/出发点。点任意一段线可查看该段并跳转导航。</p>
+      <div class="action-row">
+        <button id="btnNavAll" class="primary">🧭 在高德地图导航全程</button>
+      </div>
+      <p class="hint">当前用直线示意路段 + 高德 URI 跳转实现；正式版将接入地图开放平台路径规划 API，逐段给出「几号线、哪个口出、步行多少米」（详见 技术设计-行程编排.md）。</p>
+    </div>
+
+  </section>
+
+  <aside class="mapcard">
+    <div id="map"></div>
+    <div class="map-toolbar">
+      <button id="btnFitSpots" class="ghost-btn sm">查看全部景点</button>
+      <button id="btnFitRoute" class="ghost-btn sm">回到路线</button>
+    </div>
+    <div id="legend" class="legend hidden">
+      <div><i class="sw walk"></i>步行</div>
+      <div><i class="sw bike"></i>骑行</div>
+      <div><i class="sw transit"></i>公交地铁</div>
+      <div><i class="sw taxi"></i>打车</div>
+      <div><i class="sw hub"></i>住宿/出发点</div>
+    </div>
+    <div id="mapHint" class="map-hint">选择城市后，这里展示两地位置与景点分布</div>
+  </aside>
+</main>
+
+<footer class="foot">
+  页面为演示原型：城际交通时间/价格、市内通勤时长均为按距离的<b>估算值（示意数据）</b>；
+  景点坐标为近似值；底图 © 高德地图 / OpenStreetMap。算法与交互结构为真实实现。
+</footer>
+
+<div id="toast" class="toast hidden"></div>
+
+<script>
+  // Leaflet 加载失败时回退到 unpkg
+  window.addEventListener('error', function (e) {
+    if (e && e.target && e.target.tagName === 'SCRIPT' && !window.__leafletFallback) {
+      window.__leafletFallback = true;
+      var s = document.createElement('script');
+      s.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+      document.head.appendChild(s);
+    }
+  }, true);
+</script>
+<script src="https://cdn.bootcdn.net/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="travel.js"></script>
+</body>
+</html>
