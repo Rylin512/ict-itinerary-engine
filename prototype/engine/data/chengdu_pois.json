@@ -1,0 +1,147 @@
+{
+  "city": "成都",
+  "note": "演示城市基础数据。开放时间/票价按公开信息整理，坐标为近似值；用于算法验证，接入真实 POI API 后替换。",
+  "pois": [
+    {
+      "id": "kuanzhai", "name": "宽窄巷子", "lat": 30.6636, "lng": 104.0556,
+      "category": "历史街区", "tags": ["拍照", "小吃", "街巷"],
+      "open": "08:30", "close": "22:00", "closed_weekdays": [],
+      "ticket": 0, "suggest_min": 100, "min_min": 60, "max_min": 150,
+      "satisfaction": 0.92, "indoor": false,
+      "access": {"station": "宽窄巷子", "exit": "B", "walk_m": 180},
+      "note": "侧巷比主街安静，茶馆和小吃多"
+    },
+    {
+      "id": "renmin", "name": "人民公园", "lat": 30.6608, "lng": 104.0576,
+      "category": "公园", "tags": ["茶馆", "休闲", "本地生活"],
+      "open": "06:30", "close": "22:00", "closed_weekdays": [],
+      "ticket": 0, "suggest_min": 90, "min_min": 50, "max_min": 120,
+      "satisfaction": 0.85, "indoor": false,
+      "access": {"station": "人民公园", "exit": "B", "walk_m": 150},
+      "note": "鹤鸣茶社适合歇脚，正好接午餐"
+    },
+    {
+      "id": "tianfu", "name": "天府广场", "lat": 30.6570, "lng": 104.0655,
+      "category": "地标", "tags": ["地标", "换乘"],
+      "open": "00:00", "close": "23:30", "closed_weekdays": [],
+      "ticket": 0, "suggest_min": 30, "min_min": 15, "max_min": 45,
+      "satisfaction": 0.60, "indoor": false,
+      "access": {"station": "天府广场", "exit": "C", "walk_m": 60},
+      "note": "1/2 号线换乘，顺路看一眼即可"
+    },
+    {
+      "id": "chunxi", "name": "春熙路·太古里", "lat": 30.6538, "lng": 104.0810,
+      "category": "商圈", "tags": ["购物", "夜景", "美食"],
+      "open": "10:00", "close": "22:00", "closed_weekdays": [],
+      "ticket": 0, "suggest_min": 90, "min_min": 45, "max_min": 150,
+      "satisfaction": 0.88, "indoor": false,
+      "access": {"station": "春熙路", "exit": "D", "walk_m": 220},
+      "note": "太古里白天看建筑，晚上看灯光", "rain_ok": true
+    },
+    {
+      "id": "cdmuseum", "name": "成都博物馆", "lat": 30.6570, "lng": 104.0630,
+      "category": "博物馆", "tags": ["历史", "免费", "需预约"],
+      "open": "09:00", "close": "17:00", "closed_weekdays": [1],
+      "ticket": 0, "suggest_min": 120, "min_min": 80, "max_min": 150,
+      "satisfaction": 0.90, "indoor": true,
+      "access": {"station": "天府广场", "exit": "西1", "walk_m": 350},
+      "note": "每周一闭馆，需提前预约", "rain_ok": true
+    },
+    {
+      "id": "wenshu", "name": "文殊院", "lat": 30.6810, "lng": 104.0710,
+      "category": "寺庙", "tags": ["寺庙", "素斋", "清静"],
+      "open": "08:00", "close": "17:00", "closed_weekdays": [],
+      "ticket": 0, "suggest_min": 60, "min_min": 40, "max_min": 90,
+      "satisfaction": 0.80, "indoor": false,
+      "access": {"station": "文殊院", "exit": "K", "walk_m": 300},
+      "note": "旁边的素斋和甜水面值得排队", "rain_ok": true
+    },
+    {
+      "id": "wuhou", "name": "武侯祠", "lat": 30.6455, "lng": 104.0458,
+      "category": "历史", "tags": ["三国", "历史", "园林"],
+      "open": "08:00", "close": "20:00", "closed_weekdays": [],
+      "ticket": 50, "suggest_min": 100, "min_min": 70, "max_min": 140,
+      "satisfaction": 0.90, "indoor": false,
+      "access": {
+        "station": "高升桥", "exit": "D", "walk_m": 150,
+        "bus": {"line": "1024路（示意）", "ride_min": 6, "wait_min": 5, "fare": 2, "walk_m": 200}
+      },
+      "note": "红墙竹影是拍照点，正门进"
+    },
+    {
+      "id": "jinli", "name": "锦里", "lat": 30.6437, "lng": 104.0440,
+      "category": "街区", "tags": ["小吃", "夜景", "拍照"],
+      "open": "09:00", "close": "22:30", "closed_weekdays": [],
+      "ticket": 0, "suggest_min": 90, "min_min": 60, "max_min": 120,
+      "satisfaction": 0.85, "indoor": false,
+      "access": {
+        "station": "高升桥", "exit": "D", "walk_m": 200,
+        "bus": {"line": "1024路（示意）", "ride_min": 8, "wait_min": 5, "fare": 2, "walk_m": 250}
+      },
+      "note": "紧挨武侯祠，可与武侯祠连着排"
+    },
+    {
+      "id": "dufu", "name": "杜甫草堂", "lat": 30.6605, "lng": 104.0288,
+      "category": "历史", "tags": ["诗歌", "园林", "安静"],
+      "open": "08:00", "close": "18:30", "closed_weekdays": [],
+      "ticket": 50, "suggest_min": 110, "min_min": 80, "max_min": 150,
+      "satisfaction": 0.88, "indoor": false,
+      "access": {
+        "station": "中医大省医院", "exit": "A", "walk_m": 200,
+        "bus": {"line": "58路（示意）", "ride_min": 10, "wait_min": 6, "fare": 2, "walk_m": 300}
+      },
+      "note": "园林大，夏天遮阴好；带老人可坐电瓶车"
+    },
+    {
+      "id": "jinsha", "name": "金沙遗址博物馆", "lat": 30.6830, "lng": 104.0130,
+      "category": "博物馆", "tags": ["考古", "室内", "太阳神鸟"],
+      "open": "08:00", "close": "18:00", "closed_weekdays": [1],
+      "ticket": 70, "suggest_min": 120, "min_min": 90, "max_min": 150,
+      "satisfaction": 0.90, "indoor": true,
+      "access": {"station": "金沙博物馆", "exit": "C", "walk_m": 400},
+      "note": "每周一闭馆；遗址馆较暗，拍照关闪光", "rain_ok": true
+    },
+    {
+      "id": "panda", "name": "成都大熊猫繁育研究基地", "lat": 30.7327, "lng": 104.1457,
+      "category": "动物园", "tags": ["熊猫", "必去", "户外"],
+      "open": "07:30", "close": "18:00", "closed_weekdays": [],
+      "ticket": 55, "suggest_min": 180, "min_min": 120, "max_min": 210,
+      "satisfaction": 0.98, "indoor": false,
+      "access": {
+        "station": "熊猫大道", "exit": "A", "walk_m": 200,
+        "bus": {"line": "熊猫直通车（示意）", "ride_min": 12, "wait_min": 8, "fare": 2, "walk_m": 180}
+      },
+      "note": "越早越好，9 点前熊猫最活跃；在城北，单独占半天"
+    },
+    {
+      "id": "dongjiao", "name": "东郊记忆", "lat": 30.6720, "lng": 104.1250,
+      "category": "文创园", "tags": ["工业风", "拍照", "演出"],
+      "open": "10:00", "close": "22:00", "closed_weekdays": [],
+      "ticket": 0, "suggest_min": 110, "min_min": 70, "max_min": 150,
+      "satisfaction": 0.80, "indoor": false,
+      "access": {
+        "station": "万年场", "exit": "B", "walk_m": 300,
+        "bus": {"line": "180路（示意）", "ride_min": 8, "wait_min": 6, "fare": 2, "walk_m": 250}
+      },
+      "note": "厂房改造，适合傍晚去，顺路吃饭"
+    },
+    {
+      "id": "jiuyan", "name": "九眼桥", "lat": 30.6420, "lng": 104.0870,
+      "category": "夜生活", "tags": ["夜景", "酒吧", "江边"],
+      "open": "18:00", "close": "23:30", "closed_weekdays": [],
+      "ticket": 0, "suggest_min": 90, "min_min": 60, "max_min": 120,
+      "satisfaction": 0.75, "indoor": false,
+      "access": {"station": "牛王庙", "exit": "A", "walk_m": 700},
+      "note": "晚上才热闹，白天去没意义"
+    },
+    {
+      "id": "qingyang", "name": "青羊宫", "lat": 30.6650, "lng": 104.0380,
+      "category": "道观", "tags": ["道观", "清静"],
+      "open": "08:00", "close": "18:00", "closed_weekdays": [],
+      "ticket": 10, "suggest_min": 60, "min_min": 40, "max_min": 90,
+      "satisfaction": 0.70, "indoor": false,
+      "access": {"station": "中医大省医院", "exit": "B", "walk_m": 900},
+      "note": "离杜甫草堂不远，可顺路", "rain_ok": true
+    }
+  ]
+}

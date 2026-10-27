@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f5f2ea">
+<title>成都行程编排 · 赛题一原型</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="logo">蓉</div>
+    <div>
+      <h1>成都行程编排</h1>
+      <p class="sub">勾景点 → 出口级路线 → 时间真的走得完</p>
+    </div>
+  </div>
+  <div class="badges">
+    <span class="badge">华为 ICT 创新赛 · 赛题一</span>
+    <span class="badge ghost">原型 · 示意数据</span>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="col left">
+    <div class="card req">
+      <div class="field">
+        <label>玩几天</label>
+        <div class="seg" id="seg-days">
+          <button data-v="1">1 天</button>
+          <button data-v="2">2 天</button>
+          <button data-v="3" class="on">3 天</button>
+          <button data-v="4">4 天</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>和谁</label>
+        <div class="seg" id="seg-party">
+          <button data-v="成人">成人</button>
+          <button data-v="老人" class="on">带父母</button>
+          <button data-v="带娃">带娃</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>节奏</label>
+        <div class="seg" id="seg-pace">
+          <button data-v="轻松">轻松</button>
+          <button data-v="标准" class="on">标准</button>
+          <button data-v="紧凑">紧凑</button>
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>预算</label>
+          <input id="budget" type="number" inputmode="numeric" step="100" min="0" value="1500">
+        </div>
+        <div class="field">
+          <label>出发日</label>
+          <select id="weekday"></select>
+        </div>
+      </div>
+    </div>
+
+    <div class="card pool-card">
+      <div class="pool-head">
+        <h2>景点池</h2>
+        <span id="sel-count" class="muted">已选 0 个</span>
+      </div>
+      <div class="pool" id="pool"></div>
+      <p class="hint">勾一下就知道代价：交通、步行、费用各变多少</p>
+    </div>
+  </section>
+
+  <section class="col right">
+    <div class="card summary" id="summary"></div>
+    <div id="alerts"></div>
+    <div id="itinerary" class="itinerary"></div>
+    <p class="foot">
+      地铁/公交/出口距离为成都<b>示意网络</b>，用于验证编排算法；时间推进、约束校验、增量重算为真实实现。
+      后端 Python 标准库，无第三方依赖。
+    </p>
+  </section>
+</main>
+
+<div id="costbar" class="costbar"></div>
+<script src="app.js"></script>
+</body>
+</html>
