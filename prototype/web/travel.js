@@ -442,13 +442,13 @@ function renderTimeline() {
   let legIdx = 0, h = '';
   order.forEach((dayIds, di) => {
     const pd = t.perDay[di];
-    h += `<div class="day-head"><span class="d-num">第 ${di + 1} 天</span>`
+    h += `<div class="day-block"><div class="day-head"><span class="d-num">第 ${di + 1} 天</span>`
       + `<span class="d-date">${fmtDateCN(state.days[di])}</span>`
       + `<span class="d-sub">通勤 ${fmtDur(pd.moveMin)} · 游玩 ${fmtDur(pd.playMin)}</span>`
       + (pd.warn ? `<span class="d-warn">⚠ 超出时间窗约 ${fmtDur(pd.warn)}</span>` : '')
-      + `</div>`;
+      + `</div><div class="day-body">`;
     if (!dayIds.length) {
-      h += `<div class="t-rest">🌿 这一天自由活动，可在「自定义安排」里把景点挪过来</div>`;
+      h += `<div class="t-rest">🌿 这一天自由活动，可在「自定义安排」里把景点挪过来</div></div></div>`;
       return;
     }
     const seq = [hub, ...dayIds.map(id => POIMAP[id]), hub];
@@ -480,6 +480,7 @@ function renderTimeline() {
           ${mv}<button class="mini navspot" data-leg="${legIdx - 1}">🧭</button></div></div>`;
       }
     });
+    h += '</div></div>';
   });
   $('#timeline').innerHTML = h;
   $('#schemeMeta').textContent = schemeMetaText();
