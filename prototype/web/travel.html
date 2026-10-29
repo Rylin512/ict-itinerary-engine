@@ -64,14 +64,26 @@
       </div>
       <div class="field-row">
         <div class="field">
-          <label>出发日期</label>
-          <input id="dateInp" type="date">
+          <label>出发日（到目的地那天）</label>
+          <input id="arriveDate" type="date">
         </div>
         <div class="field">
-          <label>&nbsp;</label>
-          <button id="btnSwap" class="ghost-btn">⇄ 交换出发 / 到达</button>
+          <label>返程日（可选，默认当天）</label>
+          <input id="returnDate" type="date">
         </div>
       </div>
+      <div class="field-row">
+        <div class="field">
+          <label>出发时刻（可选）</label>
+          <input id="departTime" type="time" value="">
+        </div>
+        <div class="field">
+          <label>返程时刻（可选）</label>
+          <input id="returnTime" type="time" value="">
+        </div>
+      </div>
+      <p class="hint" id="tripHint"></p>
+      <button id="btnSwap" class="ghost-btn" style="width:100%;margin-top:4px">⇄ 交换出发 / 到达</button>
       <button id="btnQuery" class="primary">查询交通方式 →</button>
     </div>
 
@@ -112,11 +124,11 @@
       <div class="scheme-tabs" id="schemeTabs">
         <button data-scheme="recommended" class="on">🤖 系统推荐 · 最省时</button>
         <button data-scheme="popular">🔥 大众经典路线</button>
-        <button data-scheme="custom">✍️ 自定义顺序</button>
+        <button data-scheme="custom">✍️ 自定义安排</button>
       </div>
       <p class="muted" id="schemeMeta"></p>
+      <p class="trip-meta" id="tripMeta"></p>
       <div class="opt-row">
-        <label class="chk"><input type="checkbox" id="chkClosed" checked> 结束返回住宿地</label>
         <label class="chk"><input type="checkbox" id="chkTicket" checked> 费用计入门票</label>
       </div>
       <div class="preset-row">
