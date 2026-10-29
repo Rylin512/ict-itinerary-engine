@@ -49,6 +49,19 @@
           <select id="toSel"></select>
         </div>
       </div>
+      <div class="field">
+        <label>热门目的地（一键查询）</label>
+        <div class="quick-cities" id="quickCities">
+          <button type="button" data-city="北京">北京</button>
+          <button type="button" data-city="上海">上海</button>
+          <button type="button" data-city="成都">成都</button>
+          <button type="button" data-city="重庆">重庆</button>
+          <button type="button" data-city="西安">西安</button>
+          <button type="button" data-city="长沙">长沙</button>
+          <button type="button" data-city="哈尔滨">哈尔滨</button>
+          <button type="button" data-city="香港">香港</button>
+        </div>
+      </div>
       <div class="field-row">
         <div class="field">
           <label>出发日期</label>
@@ -84,8 +97,9 @@
         <span id="selInfo" class="muted">已选 0 个 · 游玩约 0 分钟</span>
         <button id="btnClassic" class="ghost-btn">🔥 一键选入经典组合</button>
       </div>
+      <div class="tier-filter" id="tierFilter"></div>
       <div id="spotGrid" class="spot-grid"></div>
-      <p class="hint">右侧地图即景点分布，点地图上的圆点也可以勾选 / 取消；距离为距住宿地的直线距离。</p>
+      <p class="hint">景点分四级：<b>🔥热门</b>（必去打卡）、<b>💰性价比</b>（免费或便宜但值得）、<b>🌿冷门</b>（本地人爱去）、<b>🧭待探索</b>（新晋网红 / 小众宝藏）。右侧地图即分布，点圆点也可勾选。</p>
       <button id="btnPlan" class="primary">生成行程规划 →</button>
     </div>
 
@@ -170,6 +184,7 @@
   }, true);
 </script>
 <script src="https://cdn.bootcdn.net/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="travel-data.js"></script>
 <script src="travel.js"></script>
 </body>
 </html>
