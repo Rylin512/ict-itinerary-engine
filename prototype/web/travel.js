@@ -1,98 +1,34 @@
-/* 跨城出行规划 · 前端原型
- * 数据全部为内置示意数据（成都景点与单城编排版共用一套坐标/票价）；
- * 交通时长、价格按距离估算；接入真实 API 时替换 intercityOptions / legOpts 两个函数即可。
+/* 跨城出行规划 · 页面逻辑
+ * 数据在 travel-data.js（全国地级行政区 + 41 个城市分级景点，示意数据）；
+ * 交通时长、价格按距离估算；接真实 API 时替换 intercityOptions / legOpts 即可。
  */
 'use strict';
 
-/* ================= 数据 ================= */
+/* ================= 构建索引 ================= */
 
-const CITIES = [
-  { id: 'beijing',   name: '北京', lat: 39.904, lng: 116.407, hub: '酒店（前门·市中心）', hubLat: 39.899, hubLng: 116.398 },
-  { id: 'shanghai',  name: '上海', lat: 31.230, lng: 121.474, hub: '酒店（人民广场）', hubLat: 31.232, hubLng: 121.474 },
-  { id: 'xian',      name: '西安', lat: 34.342, lng: 108.940, hub: '酒店（钟楼）', hubLat: 34.261, hubLng: 108.943 },
-  { id: 'chengdu',   name: '成都', lat: 30.572, lng: 104.067, hub: '酒店（春熙路）', hubLat: 30.6545, hubLng: 104.0800 },
-  { id: 'hangzhou',  name: '杭州', lat: 30.274, lng: 120.155, hub: '酒店（湖滨·西湖东）', hubLat: 30.249, hubLng: 120.155 },
-  { id: 'guangzhou', name: '广州', lat: 23.129, lng: 113.264, hub: '酒店（珠江新城）', hubLat: 23.119, hubLng: 113.321 },
-];
-
-/* 字段与 engine/data/chengdu_pois.json 对齐：id/name/lat/lng/ticket/suggest_min/satisfaction */
-const POIS = {
-  chengdu: [
-    { id: 'kuanzhai', name: '宽窄巷子', lat: 30.6636, lng: 104.0556, category: '历史街区', tags: ['拍照', '小吃'], ticket: 0, suggest_min: 100, satisfaction: 0.92, note: '侧巷比主街安静，茶馆和小吃多' },
-    { id: 'renmin', name: '人民公园', lat: 30.6608, lng: 104.0576, category: '公园', tags: ['茶馆', '休闲'], ticket: 0, suggest_min: 90, satisfaction: 0.85, note: '鹤鸣茶社适合歇脚，正好接午餐' },
-    { id: 'tianfu', name: '天府广场', lat: 30.6570, lng: 104.0655, category: '地标', tags: ['地标'], ticket: 0, suggest_min: 30, satisfaction: 0.60, note: '顺路看一眼即可' },
-    { id: 'chunxi', name: '春熙路·太古里', lat: 30.6538, lng: 104.0810, category: '商圈', tags: ['购物', '夜景'], ticket: 0, suggest_min: 90, satisfaction: 0.88, note: '太古里白天看建筑，晚上看灯光' },
-    { id: 'cdmuseum', name: '成都博物馆', lat: 30.6570, lng: 104.0630, category: '博物馆', tags: ['历史', '需预约'], ticket: 0, suggest_min: 120, satisfaction: 0.90, note: '每周一闭馆，需提前预约' },
-    { id: 'wenshu', name: '文殊院', lat: 30.6810, lng: 104.0710, category: '寺庙', tags: ['寺庙', '素斋'], ticket: 0, suggest_min: 60, satisfaction: 0.80, note: '旁边的素斋和甜水面值得排队' },
-    { id: 'wuhou', name: '武侯祠', lat: 30.6455, lng: 104.0458, category: '历史', tags: ['三国', '园林'], ticket: 50, suggest_min: 100, satisfaction: 0.90, note: '红墙竹影是拍照点，正门进' },
-    { id: 'jinli', name: '锦里', lat: 30.6437, lng: 104.0440, category: '街区', tags: ['小吃', '夜景'], ticket: 0, suggest_min: 90, satisfaction: 0.85, note: '紧挨武侯祠，可连着排' },
-    { id: 'dufu', name: '杜甫草堂', lat: 30.6605, lng: 104.0288, category: '历史', tags: ['诗歌', '园林'], ticket: 50, suggest_min: 110, satisfaction: 0.88, note: '园林大，夏天遮阴好' },
-    { id: 'jinsha', name: '金沙遗址博物馆', lat: 30.6830, lng: 104.0130, category: '博物馆', tags: ['考古', '室内'], ticket: 70, suggest_min: 120, satisfaction: 0.90, note: '每周一闭馆' },
-    { id: 'panda', name: '大熊猫繁育研究基地', lat: 30.7327, lng: 104.1457, category: '动物园', tags: ['熊猫', '必去'], ticket: 55, suggest_min: 180, satisfaction: 0.98, note: '越早越好，9 点前熊猫最活跃，单独占半天' },
-    { id: 'dongjiao', name: '东郊记忆', lat: 30.6720, lng: 104.1250, category: '文创园', tags: ['工业风', '拍照'], ticket: 0, suggest_min: 110, satisfaction: 0.80, note: '厂房改造，适合傍晚去，顺路吃饭' },
-    { id: 'jiuyan', name: '九眼桥', lat: 30.6420, lng: 104.0870, category: '夜生活', tags: ['夜景', '江边'], ticket: 0, suggest_min: 90, satisfaction: 0.75, note: '晚上才热闹，白天去没意义' },
-    { id: 'qingyang', name: '青羊宫', lat: 30.6650, lng: 104.0380, category: '道观', tags: ['道观', '清静'], ticket: 10, suggest_min: 60, satisfaction: 0.70, note: '离杜甫草堂不远，可顺路' },
-  ],
-  beijing: [
-    { id: 'gugong', name: '故宫博物院', lat: 39.917, lng: 116.397, category: '历史', tags: ['世界遗产', '必去'], ticket: 60, suggest_min: 210, satisfaction: 0.97, note: '需提前预约，上午入宫人流最少' },
-    { id: 'tiananmen', name: '天安门广场', lat: 39.903, lng: 116.397, category: '地标', tags: ['地标', '升旗'], ticket: 0, suggest_min: 60, satisfaction: 0.95, note: '看升旗要早起，广场需预约' },
-    { id: 'summerpalace', name: '颐和园', lat: 39.999, lng: 116.273, category: '园林', tags: ['世界遗产', '皇家园林'], ticket: 30, suggest_min: 180, satisfaction: 0.92, note: '昆明湖东岸走完约 3 小时' },
-    { id: 'greatwall', name: '八达岭长城', lat: 40.360, lng: 116.024, category: '历史', tags: ['世界遗产', '户外'], ticket: 40, suggest_min: 210, satisfaction: 0.94, note: '在郊区，单独占半天到一天' },
-    { id: 'templeheaven', name: '天坛公园', lat: 39.882, lng: 116.411, category: '历史', tags: ['世界遗产', '公园'], ticket: 15, suggest_min: 90, satisfaction: 0.88, note: '祈年殿早上光线最好' },
-    { id: 'nanluogu', name: '南锣鼓巷', lat: 39.941, lng: 116.403, category: '街区', tags: ['胡同', '小吃'], ticket: 0, suggest_min: 90, satisfaction: 0.82, note: '主街人多，支巷更有味道' },
-    { id: 'shichahai', name: '什刹海', lat: 39.941, lng: 116.384, category: '街区', tags: ['胡同', '夜景'], ticket: 0, suggest_min: 90, satisfaction: 0.83, note: '傍晚环湖最好，可接南锣鼓巷' },
-    { id: 'yonghegong', name: '雍和宫', lat: 39.948, lng: 116.418, category: '寺庙', tags: ['寺庙', '文化'], ticket: 25, suggest_min: 90, satisfaction: 0.85, note: '香火旺，门口可领香' },
-    { id: 'olympic', name: '奥林匹克公园（鸟巢/水立方）', lat: 39.991, lng: 116.391, category: '地标', tags: ['地标', '夜景'], ticket: 0, suggest_min: 90, satisfaction: 0.80, note: '建议晚上看灯光' },
-  ],
-  shanghai: [
-    { id: 'bund', name: '外滩', lat: 31.234, lng: 121.490, category: '地标', tags: ['夜景', '必去'], ticket: 0, suggest_min: 90, satisfaction: 0.96, note: '傍晚到亮灯之间最佳' },
-    { id: 'orientaltv', name: '东方明珠', lat: 31.240, lng: 121.500, category: '地标', tags: ['观景', '亲子'], ticket: 199, suggest_min: 120, satisfaction: 0.90, note: '可与外滩隔江相望，二选一或都去' },
-    { id: 'yuyuan', name: '豫园·城隍庙', lat: 31.227, lng: 121.492, category: '园林', tags: ['江南园林', '小吃'], ticket: 40, suggest_min: 90, satisfaction: 0.87, note: '九曲桥人最多，早上清静' },
-    { id: 'nanjingrd', name: '南京路步行街', lat: 31.235, lng: 121.480, category: '商圈', tags: ['购物'], ticket: 0, suggest_min: 90, satisfaction: 0.88, note: '连接人民广场与外滩，顺路走' },
-    { id: 'tianzifang', name: '田子坊', lat: 31.210, lng: 121.467, category: '街区', tags: ['文艺', '弄堂'], ticket: 0, suggest_min: 90, satisfaction: 0.80, note: '弄堂小店多，适合慢逛' },
-    { id: 'disney', name: '上海迪士尼度假区', lat: 31.143, lng: 121.657, category: '乐园', tags: ['亲子', '一整天'], ticket: 475, suggest_min: 480, satisfaction: 0.95, note: '单独占一天，需早去' },
-    { id: 'shmuseum', name: '上海博物馆', lat: 31.229, lng: 121.475, category: '博物馆', tags: ['历史', '免费'], ticket: 0, suggest_min: 120, satisfaction: 0.85, note: '青铜馆是镇馆看点' },
-    { id: 'wukang', name: '武康路·衡复风貌区', lat: 31.207, lng: 121.438, category: '街区', tags: ['文艺', '建筑'], ticket: 0, suggest_min: 90, satisfaction: 0.78, note: '梧桐区 City Walk 起点之一' },
-    { id: 'zhujiajiao', name: '朱家角古镇', lat: 31.111, lng: 121.054, category: '古镇', tags: ['水乡', '半日'], ticket: 60, suggest_min: 180, satisfaction: 0.82, note: '在郊区，往返要多留 3 小时' },
-  ],
-  xian: [
-    { id: 'terracotta', name: '秦始皇帝陵博物院（兵马俑）', lat: 34.384, lng: 109.278, category: '历史', tags: ['世界遗产', '必去'], ticket: 120, suggest_min: 210, satisfaction: 0.97, note: '在临潼，市区过去单程约 1 小时' },
-    { id: 'dayanta', name: '大雁塔', lat: 34.223, lng: 108.964, category: '历史', tags: ['地标', '喷泉'], ticket: 30, suggest_min: 90, satisfaction: 0.93, note: '北广场音乐喷泉晚上有场次' },
-    { id: 'datang', name: '大唐不夜城', lat: 34.216, lng: 108.960, category: '街区', tags: ['夜景', '演出'], ticket: 0, suggest_min: 90, satisfaction: 0.90, note: '一定要晚上去，紧挨大雁塔' },
-    { id: 'citywall', name: '西安城墙（永宁门）', lat: 34.259, lng: 108.934, category: '历史', tags: ['古城墙', '骑行'], ticket: 54, suggest_min: 120, satisfaction: 0.90, note: '城墙上可租自行车，环骑约 100 分钟' },
-    { id: 'muslim', name: '回民街·北院门', lat: 34.265, lng: 108.937, category: '街区', tags: ['美食'], ticket: 0, suggest_min: 90, satisfaction: 0.82, note: '主街商业化，洒金桥更本地' },
-    { id: 'shanxihistory', name: '陕西历史博物馆', lat: 34.223, lng: 108.953, category: '博物馆', tags: ['历史', '需预约'], ticket: 0, suggest_min: 150, satisfaction: 0.92, note: '免费但要抢预约，珍宝馆另购票' },
-    { id: 'huaqing', name: '华清宫', lat: 34.362, lng: 109.213, category: '历史', tags: ['遗址', '演出'], ticket: 120, suggest_min: 150, satisfaction: 0.85, note: '可与兵马俑同一天（同在临潼）' },
-    { id: 'belltower', name: '钟楼·鼓楼', lat: 34.261, lng: 108.943, category: '地标', tags: ['地标'], ticket: 30, suggest_min: 60, satisfaction: 0.82, note: '市中心，顺路打卡即可' },
-    { id: 'beilin', name: '西安碑林博物馆', lat: 34.252, lng: 108.947, category: '博物馆', tags: ['书法', '历史'], ticket: 65, suggest_min: 90, satisfaction: 0.84, note: '书法爱好者必去' },
-  ],
-  hangzhou: [
-    { id: 'westlake', name: '西湖（湖滨·断桥）', lat: 30.260, lng: 120.156, category: '湖泊', tags: ['世界遗产', '必去'], ticket: 0, suggest_min: 150, satisfaction: 0.96, note: '断桥—白堤—孤山一线最经典' },
-    { id: 'leifeng', name: '雷峰塔', lat: 30.231, lng: 120.148, category: '历史', tags: ['地标', '日落'], ticket: 40, suggest_min: 60, satisfaction: 0.83, note: '塔顶看西湖日落最佳' },
-    { id: 'lingyin', name: '灵隐寺·飞来峰', lat: 30.247, lng: 120.098, category: '寺庙', tags: ['寺庙', '石窟'], ticket: 75, suggest_min: 120, satisfaction: 0.90, note: '飞来峰门票含灵隐寺，早上人少' },
-    { id: 'hefang', name: '清河坊·河坊街', lat: 30.244, lng: 120.166, category: '街区', tags: ['美食', '老街'], ticket: 0, suggest_min: 90, satisfaction: 0.80, note: '离西湖近，顺路吃晚饭' },
-    { id: 'songcheng', name: '宋城', lat: 30.196, lng: 120.115, category: '乐园', tags: ['演出', '亲子'], ticket: 320, suggest_min: 210, satisfaction: 0.85, note: '《宋城千古情》演出是核心' },
-    { id: 'xixi', name: '西溪国家湿地公园', lat: 30.273, lng: 120.063, category: '湿地', tags: ['自然', '摇橹船'], ticket: 80, suggest_min: 180, satisfaction: 0.84, note: '坐摇橹船进深处才好玩' },
-    { id: 'canal', name: '京杭大运河·拱宸桥', lat: 30.325, lng: 120.142, category: '历史', tags: ['世界遗产', '夜景'], ticket: 0, suggest_min: 90, satisfaction: 0.78, note: '傍晚桥边喝茶，人少清静' },
-    { id: 'longjing', name: '龙井村·九溪烟树', lat: 30.215, lng: 120.105, category: '自然', tags: ['茶园', '徒步'], ticket: 0, suggest_min: 120, satisfaction: 0.79, note: '春天采茶季最美' },
-  ],
-  guangzhou: [
-    { id: 'cantontower', name: '广州塔', lat: 23.107, lng: 113.323, category: '地标', tags: ['夜景', '观景'], ticket: 150, suggest_min: 90, satisfaction: 0.92, note: '傍晚上去一次看日景+夜景' },
-    { id: 'chenpi', name: '陈家祠', lat: 23.126, lng: 113.247, category: '历史', tags: ['建筑', '岭南'], ticket: 10, suggest_min: 60, satisfaction: 0.87, note: '岭南建筑木雕砖雕巅峰' },
-    { id: 'shamian', name: '沙面岛', lat: 23.108, lng: 113.237, category: '街区', tags: ['欧式建筑', '拍照'], ticket: 0, suggest_min: 90, satisfaction: 0.84, note: '老洋房适合慢逛拍照' },
-    { id: 'yuexiu', name: '越秀公园·五羊雕像', lat: 23.147, lng: 113.267, category: '公园', tags: ['地标', '公园'], ticket: 0, suggest_min: 90, satisfaction: 0.82, note: '广州城徽五羊雕像在这' },
-    { id: 'beijingrd', name: '北京路步行街', lat: 23.131, lng: 113.269, category: '商圈', tags: ['购物', '美食'], ticket: 0, suggest_min: 90, satisfaction: 0.80, note: '脚下有千年古道遗址' },
-    { id: 'shangxiajiu', name: '上下九步行街', lat: 23.116, lng: 113.245, category: '商圈', tags: ['美食', '骑楼'], ticket: 0, suggest_min: 90, satisfaction: 0.79, note: '骑楼老街，小吃集中' },
-    { id: 'baiyun', name: '白云山', lat: 23.183, lng: 113.299, category: '自然', tags: ['户外', '登山'], ticket: 5, suggest_min: 180, satisfaction: 0.83, note: '市区绿肺，早晨空气最好' },
-    { id: 'changlong', name: '长隆野生动物世界', lat: 22.998, lng: 113.330, category: '乐园', tags: ['亲子', '一整天'], ticket: 300, suggest_min: 300, satisfaction: 0.93, note: '在番禺，单独占一天' },
-    { id: 'zhujiangnew', name: '花城广场·海心桥', lat: 23.119, lng: 113.321, category: '地标', tags: ['夜景', 'CBD'], ticket: 0, suggest_min: 60, satisfaction: 0.82, note: '与广州塔隔江对望，晚上去' },
-  ],
-};
-
-const POIMAP = {};
-Object.values(POIS).forEach(list => list.forEach(p => { POIMAP[p.id] = p; }));
+const CITIES = [];
+PROVINCE_CITIES.forEach(([province, list]) => {
+  list.forEach(([name, lng, lat]) => {
+    CITIES.push({ name, province, lat, lng, curated: !!POI_RAW[name] });
+  });
+});
 const CITYMAP = {};
-CITIES.forEach(c => { CITYMAP[c.id] = c; });
+CITIES.forEach(c => { CITYMAP[c.name] = c; });
+const CURATED_CITIES = CITIES.filter(c => c.curated);
+
+/* POI：id = 「景点名@城市」，成都用引擎同源 id */
+const POIS = {};   // 城市名 -> [poi]
+const POIMAP = {}; // 全局 id -> poi
+Object.keys(POI_RAW).forEach(city => {
+  POIS[city] = POI_RAW[city].map(([name, lat, lng, tier, ticket, suggest_min, satisfaction, note]) => {
+    const id = LEGACY_POI_IDS[name] || `${name}@${city}`;
+    const p = { id, name, lat, lng, tier, ticket, suggest_min, satisfaction, note, city };
+    POIMAP[id] = p;
+    return p;
+  });
+});
+
+const TIERS_ALL = ['hot', 'value', 'niche', 'explore'];
 
 /* ================= 小工具 ================= */
 
@@ -105,7 +41,7 @@ function hav(a, b) { // 两点球面距离，km
   const s = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLng / 2) ** 2;
   return 2 * R * Math.asin(Math.sqrt(s));
 }
-const roadKm = (a, b) => hav(a, b) * 1.35; // 直线 → 路网系数
+const roadKm = (a, b) => hav(a, b) * 1.35;
 
 function fmtDur(min) {
   min = Math.round(min);
@@ -128,22 +64,27 @@ function toast(msg) {
 /* ================= 状态 ================= */
 
 const state = {
-  from: CITYMAP.shanghai,
-  to: CITYMAP.chengdu,
+  from: CITYMAP['上海'],
+  to: CITYMAP['成都'],
   date: '',
-  transport: null,      // 选中的城际方式 {id,name,icon,min,cost}
-  intercity: null,      // {d, list}
-  selected: [],         // 目的地景点 id
-  orders: {},           // {recommended:[ids], popular:[ids], custom:[ids]}
+  transport: null,
+  intercity: null,
+  selected: [],
+  orders: {},
   scheme: 'recommended',
-  modes: [],            // 每段通勤方式 id
+  modes: [],
   closed: true,
   withTicket: true,
   step: 1,
   maxStep: 1,
+  spotTier: 'all',
 };
 
-const hubOf = c => ({ name: c.hub, lat: c.hubLat ?? c.lat, lng: c.hubLng ?? c.lng, isHub: true });
+function hubOf(c) {
+  const h = HUBS[c.name];
+  if (h) return { name: h[0], lat: h[1], lng: h[2], isHub: true };
+  return { name: '市中心（默认住宿）', lat: c.lat, lng: c.lng, isHub: true };
+}
 
 /* ================= 城际交通（示意估算） ================= */
 
@@ -352,21 +293,75 @@ function renderTimeline() {
 
 /* ================= 景点选择 ================= */
 
+function tierLabel(t) { return TIERS[t] ? TIERS[t].label : ''; }
+
 function renderSpots() {
-  const list = POIS[state.to.id];
-  const hub = hubOf(state.to);
+  const list = POIS[state.to.name] || [];
   $('#destName').textContent = state.to.name;
-  $('#spotGrid').innerHTML = list.map(p => {
+
+  if (!list.length) return renderNotCovered();
+
+  renderTierFilter(list);
+  const shown = state.spotTier === 'all' ? list : list.filter(p => p.tier === state.spotTier);
+  const hub = hubOf(state.to);
+  if (!shown.length) {
+    $('#spotGrid').innerHTML = '<div class="notice"><p>该分类下暂无景点，换一个分类看看。</p></div>';
+    updateSelInfo();
+    return;
+  }
+  $('#spotGrid').innerHTML = shown.map(p => {
     const on = state.selected.includes(p.id);
     const km = hav(hub, p);
     return `<button class="spot${on ? ' on' : ''}" data-id="${p.id}">
       <span class="tick">${on ? '✓' : ''}</span>
+      <span class="tier t-${p.tier}">${tierLabel(p.tier)}</span>
       <span class="nm">${p.name}</span>
-      <span class="meta"><span>${p.category}</span><span>${p.ticket ? '¥' + p.ticket : '免费'}</span><span>约 ${fmtDur(p.suggest_min)}</span><span>${fmtKm(km)}</span></span>
+      <span class="meta"><span>${p.ticket ? '¥' + p.ticket : '免费'}</span><span>约 ${fmtDur(p.suggest_min)}</span><span>${fmtKm(km)}</span></span>
       <span class="bar"><i style="width:${Math.round(p.satisfaction * 100)}%"></i></span>
     </button>`;
   }).join('');
   updateSelInfo();
+}
+
+function renderTierFilter(list) {
+  const counts = { all: list.length };
+  TIERS_ALL.forEach(t => { counts[t] = list.filter(p => p.tier === t).length; });
+  const cells = [['all', '全部']].concat(TIERS_ALL.map(t => [t, tierLabel(t)]));
+  $('#tierFilter').classList.remove('hidden');
+  $('#tierFilter').innerHTML = cells.map(([t, label]) => {
+    const off = t !== 'all' && !counts[t];
+    return `<button data-tier="${t}" ${off ? 'disabled' : ''} class="${state.spotTier === t ? 'on' : ''}">${label}${counts[t] ? ` <i>${counts[t]}</i>` : ''}</button>`;
+  }).join('');
+}
+
+function renderNotCovered() {
+  $('#tierFilter').classList.add('hidden');
+  $('#selInfo').textContent = '已选 0 个';
+  const hub = hubOf(state.to);
+  const near = CURATED_CITIES
+    .map(c => ({ c, km: hav(state.to, c) }))
+    .sort((a, b) => a.km - b.km)
+    .slice(0, 3);
+  $('#spotGrid').innerHTML = `
+    <div class="notice">
+      <h3>🧭 「${state.to.name}」的景点数据待收录</h3>
+      <p>本原型深度收录了 ${CURATED_CITIES.length} 个城市（四级分类：热门 / 性价比 / 冷门 / 待探索），
+      其余地级市可正常作为出发地与目的地查询交通，但暂不能生成市内行程。</p>
+      <p class="muted">这对应数据源矩阵里「POI 需人工录入 + 标注来源」的现实约束；接入地图开放平台 POI 检索后即可自动覆盖。</p>
+      <p class="near-label">附近已收录的城市：</p>
+      <div class="near-list">
+        ${near.map(n => `<button class="ghost-btn" data-goto-city="${n.c.name}">${n.c.name} · ${Math.round(n.km)} km</button>`).join('')}
+      </div>
+    </div>`;
+  // 地图上至少标出市中心
+  if (map && gSpots) {
+    gSpots.clearLayers();
+    Object.keys(spotMarkers).forEach(k => delete spotMarkers[k]);
+    L.circleMarker([state.to.lat, state.to.lng], {
+      radius: 8, color: '#fff', weight: 2, fillColor: '#a8671c', fillOpacity: 0.95,
+    }).addTo(gSpots).bindPopup(`<b>${state.to.name}</b><br>市中心（示意）`);
+    fitPts([state.to]);
+  }
 }
 
 function updateSelInfo() {
@@ -429,7 +424,7 @@ function showIntercity() {
   L.polyline([[a.lat, a.lng], [b.lat, b.lng]], { color: '#7a746b', weight: 2.5, dashArray: '6,8' })
     .bindPopup(`<b>${a.name} → ${b.name}</b><br>直线约 ${Math.round(hav(a, b))} km`)
     .addTo(gInter);
-  [a, b].forEach((c, i) => {
+  [a, b].forEach((c) => {
     L.marker([c.lat, c.lng], {
       icon: L.divIcon({ className: 'pin-wrap', html: `<div class="pin city">${c.name}</div>`, iconSize: [40, 22], iconAnchor: [20, 11] }),
       zIndexOffset: 400,
@@ -450,16 +445,18 @@ function showSpots(fit) {
   if (!map) return;
   gSpots.clearLayers();
   Object.keys(spotMarkers).forEach(k => delete spotMarkers[k]);
-  POIS[state.to.id].forEach(p => {
+  const list = POIS[state.to.name] || [];
+  if (!list.length) { renderNotCovered(); return; }
+  list.forEach(p => {
     const m = L.circleMarker([p.lat, p.lng], {
       radius: 7, color: '#fff', weight: 2,
       fillColor: state.selected.includes(p.id) ? '#1f6b4f' : '#a8a093', fillOpacity: 0.95,
     }).addTo(gSpots);
-    m.bindPopup(`<b>${p.name}</b><br>${p.category} · ${p.ticket ? '门票 ¥' + p.ticket : '免费'} · 建议玩 ${fmtDur(p.suggest_min)}<br>${p.note || ''}`);
+    m.bindPopup(`<b>${p.name}</b><br>${tierLabel(p.tier)} · ${p.ticket ? '门票 ¥' + p.ticket : '免费'} · 建议玩 ${fmtDur(p.suggest_min)}<br>${p.note || ''}`);
     m.on('click', () => { if (state.step === 3) toggleSpot(p.id); });
     spotMarkers[p.id] = m;
   });
-  if (fit) fitPts(POIS[state.to.id]);
+  if (fit) fitPts(list);
 }
 
 function amapNav(fromPt, toPt, mode) {
@@ -557,18 +554,30 @@ function gotoStep(n) {
   state.maxStep = Math.max(state.maxStep, n);
   $('#legend').classList.toggle('hidden', n < 4);
   $('#mapHint').textContent = [
-    '选择出发地与目的地，点「查询交通方式」',
+    '选择出发地与目的地（全国地级市），点「查询交通方式」',
     '两地位置与交通对比；地图上可先看目的地景点分布',
-    '地图即景点分布：点圆点或左侧卡片勾选景点',
+    '地图即景点分布：点圆点或左侧卡片勾选景点，可按分类筛选',
     '路线已画出：颜色对应通勤方式，点线段可跳转导航',
     '点任意线段或图钉，可在高德地图中打开导航',
   ][n - 1];
   if (n === 2) showIntercity();
   if (n === 3) showSpots(false);
-  if (n >= 4) drawRoute(n === 4 || n === 5 ? true : false);
+  if (n >= 4) drawRoute(true);
 }
 
-/* ================= 方案生成与切换 ================= */
+/* ================= 查询与方案 ================= */
+
+function doQuery() {
+  state.date = $('#dateInp').value;
+  state.transport = null;
+  state.selected = [];
+  state.spotTier = 'all';
+  state.intercity = intercityOptions(state.from, state.to);
+  renderTransport();
+  $('#btnTo3').disabled = true;
+  waitMap(() => { showIntercity(); showSpots(false); });
+  gotoStep(2);
+}
 
 function buildOrders() {
   const hub = hubOf(state.to);
@@ -588,14 +597,17 @@ function applyScheme(name) {
 
 /* ================= 事件绑定 ================= */
 
+function fillCitySelect(sel, def) {
+  sel.innerHTML = PROVINCE_CITIES.map(([province, list]) =>
+    `<optgroup label="${province}">`
+    + list.map(([name]) => `<option value="${name}">${name}</option>`).join('')
+    + '</optgroup>').join('');
+  sel.value = def;
+}
+
 function bind() {
-  // 步骤 1
-  const fill = (sel, def) => {
-    sel.innerHTML = CITIES.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
-    sel.value = def;
-  };
-  fill($('#fromSel'), state.from.id);
-  fill($('#toSel'), state.to.id);
+  fillCitySelect($('#fromSel'), state.from.name);
+  fillCitySelect($('#toSel'), state.to.name);
   $('#dateInp').value = new Date().toISOString().slice(0, 10);
 
   $('#btnSwap').addEventListener('click', () => {
@@ -604,19 +616,22 @@ function bind() {
     $('#toSel').value = f;
   });
 
+  // 热门目的地快捷键
+  $('#quickCities').addEventListener('click', e => {
+    const b = e.target.closest('button[data-city]');
+    if (!b) return;
+    $('#toSel').value = b.dataset.city;
+    state.from = CITYMAP[$('#fromSel').value];
+    state.to = CITYMAP[b.dataset.city];
+    doQuery();
+  });
+
   $('#btnQuery').addEventListener('click', () => {
     const f = CITYMAP[$('#fromSel').value], t = CITYMAP[$('#toSel').value];
     if (!f || !t) return toast('请选择出发地和目的地');
-    if (f.id === t.id) return toast('出发地和目的地不能是同一座城市');
+    if (f.name === t.name) return toast('出发地和目的地不能是同一座城市');
     state.from = f; state.to = t;
-    state.date = $('#dateInp').value;
-    state.transport = null;
-    state.selected = [];
-    state.intercity = intercityOptions(f, t);
-    renderTransport();
-    $('#btnTo3').disabled = true;
-    waitMap(() => { showIntercity(); showSpots(false); });
-    gotoStep(2);
+    doQuery();
   });
 
   // 步骤 2
@@ -634,12 +649,35 @@ function bind() {
   });
 
   // 步骤 3
+  $('#tierFilter').addEventListener('click', e => {
+    const b = e.target.closest('button[data-tier]');
+    if (!b) return;
+    state.spotTier = b.dataset.tier;
+    renderSpots();
+  });
   $('#spotGrid').addEventListener('click', e => {
+    const jump = e.target.closest('button[data-goto-city]');
+    if (jump) {
+      const name = jump.dataset.gotoCity;
+      $('#toSel').value = name;
+      state.to = CITYMAP[name];
+      state.transport = null;
+      state.selected = [];
+      state.intercity = intercityOptions(state.from, state.to);
+      renderTransport();
+      $('#btnTo3').disabled = true;
+      toast(`目的地改为「${name}」，请重新选择城际交通`);
+      waitMap(() => { showIntercity(); showSpots(false); });
+      gotoStep(2);
+      return;
+    }
     const card = e.target.closest('.spot');
     if (card) toggleSpot(card.dataset.id);
   });
   $('#btnClassic').addEventListener('click', () => {
-    const top4 = POIS[state.to.id].slice().sort((a, b) => b.satisfaction - a.satisfaction).slice(0, 4);
+    const list = POIS[state.to.name] || [];
+    if (!list.length) return toast('该城市暂无景点数据');
+    const top4 = list.slice().sort((a, b) => b.satisfaction - a.satisfaction).slice(0, 4);
     state.selected = top4.map(p => p.id);
     renderSpots();
     refreshSpotMarkers();
@@ -696,7 +734,7 @@ function bind() {
     const navspot = e.target.closest('.navspot');
     if (navspot) {
       const seq = seqPoints();
-      const idx = +navspot.dataset.i; // 在 order 中的下标；对应 seq 中 i = idx+1
+      const idx = +navspot.dataset.i;
       const i = idx + 1;
       window.open(amapNav(seq[i - 1], seq[i], NAV_MODE[state.modes[i - 1]] || 'car'), '_blank');
       return;

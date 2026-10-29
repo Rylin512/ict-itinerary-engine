@@ -131,7 +131,36 @@ button.on.ghost-btn{background:var(--accent-soft);border-color:#b9dcc9;color:var
 
 /* ---------- 步骤3：景点 ---------- */
 .pool-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:4px 0 10px}
+.quick-cities{display:flex;gap:6px;flex-wrap:wrap}
+.quick-cities button{
+  border:1px solid var(--line);background:#fff;border-radius:999px;
+  padding:5px 12px;font-size:12.5px;color:var(--ink);transition:.15s;
+}
+.quick-cities button:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.tier-filter{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 10px}
+.tier-filter button{
+  border:1px solid var(--line);background:#fff;border-radius:999px;
+  padding:4px 11px;font-size:12px;color:var(--muted);transition:.15s;
+}
+.tier-filter button i{font-style:normal;opacity:.6;font-size:11px}
+.tier-filter button.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+.tier-filter button.on i{opacity:.85}
+.tier-filter button:disabled{opacity:.35;cursor:not-allowed}
 .spot-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(136px,1fr));gap:8px}
+.tier{font-size:10px;padding:1px 7px;border-radius:999px;display:inline-block;margin-bottom:5px}
+.tier.t-hot{background:#fdeee3;color:#b4501c;border:1px solid #f3d5ba}
+.tier.t-value{background:#eaf4ee;color:#1f6b4f;border:1px solid #d6e8dd}
+.tier.t-niche{background:#eef3f8;color:#2f6bb0;border:1px solid #cfdeee}
+.tier.t-explore{background:#f4ecf8;color:#6d4fa1;border:1px solid #e0d0ec}
+.notice{
+  grid-column:1/-1;background:#fff;border:1px dashed #d8cfbc;border-radius:12px;
+  padding:18px 20px;
+}
+.notice h3{margin:0 0 8px;font-size:15px}
+.notice p{margin:6px 0;font-size:13px;color:var(--ink)}
+.notice p.muted{font-size:12px}
+.near-label{margin-top:12px!important;font-weight:600}
+.near-list{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}
 .spot{
   position:relative;text-align:left;background:#fff;border:1px solid var(--line);
   border-radius:11px;padding:10px 11px;cursor:pointer;transition:.15s;
