@@ -122,6 +122,8 @@ python -m unittest discover -s tests -t . -v
 | POST | `/api/plan` | 生成整份行程 |
 | POST | `/api/toggle` | 勾选或取消一个景点，返回新行程与代价 diff |
 | POST | `/api/replan` | 局部重排某一天（例如雨天） |
+| GET | `/api/ai-config` | 本地可用的 LLM 渠道探测（key 只报有无，不回传内容） |
+| POST | `/api/llm` | OpenAI 兼容 LLM 代理（解决浏览器 CORS 与 key 不落盘） |
 
 `/api/plan` 请求示例：
 
@@ -210,7 +212,20 @@ cd prototype && python -m unittest discover -s tests -t . -v
 
 ## 数据说明
 
-成都地铁 1/2/3/4/7 号线骨架、`1024路（示意）` 与出口距离均为**示意数据**，用于验证算法与交互；景点开放时间与票价按公开信息整理。接入真实地图开放平台后，只需替换 `engine/providers/transit.py` 的 `route()`，调用方无需改动。
+按「事实 / 估算 / 演示」三档诚实标注（答辩可自证没有编数据）：
+
+| 数据 | 档位 | 来源 | 位置 |
+|---|---|---|---|
+| 成都地铁骨架、出口距离 | 示意 | 人工整理 | `engine/data/*.json` |
+| 景点池（41 城 300+ POI，坐标/票价/备注） | 事实（近似） | 公开信息整理，标注来源 | `web/travel-data.js` |
+| 车站 / 机场表（41 城机场 + 高铁站，坐标/枢纽/接驳备注） | 事实（近似） | 公开资料整理，updated 2026-10 | `web/travel-data.js` `STATIONS` |
+| 出租车计价表（18 城起步价/单价/远途费） | 事实（会浮动） | 各市发改委/交通部门公开信息，updated 2026-10 | `web/travel-data.js` `TAXI_TARIFF` |
+| 打车里程与时长 | 估算 | OSRM 公开路网（免 key），失败回退直线×1.35 | `web/travel.js` `osrmRoute()` |
+| 城际时间/票价、公交地铁接驳 | 估算 | 距离启发式公式 | `web/travel.js` |
+| 目的地攻略（美食/住宿/避坑/灵感） | 演示 | 2026-10 联网检索公开攻略整理，逐条标注来源 | `web/travel-guides.js` |
+| AI 讲解 / 问答 / 一句话规划 | 实时 | DeepSeek/OpenRouter/华为云 MaaS 等 OpenAI 兼容接口，只许转述结构化事实；离线演示通道兜底 | `web/ai.js` + `serve.py /api/llm` |
+
+说明：**滴滴 / 哈罗 / 小红书 / 携程 / 同程 / 抖音均无公开免费 API**（需企业签约），原型中分别以「出租车计价表 + OSRM」「本地攻略库 + LLM 检索问答」替代，并预留 `RideHailingProvider` / `GuideProvider` 适配位，拿到资质后换实现不动 UI。接入真实地图开放平台后，只需替换 `engine/providers/transit.py` 的 `route()`，调用方无需改动。
 
 ## 路线图
 

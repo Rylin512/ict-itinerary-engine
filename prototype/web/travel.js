@@ -1,6 +1,8 @@
 /* 跨城出行规划 · 页面逻辑（时间段 + 分天安排版）
- * 数据在 travel-data.js（全国地级行政区 + 41 城分级景点，示意数据）；
- * 城际交通与市内通勤按距离估算，接真实 API 时替换 intercityOptions / legOpts。
+ * 数据在 travel-data.js（全国地级行政区 + 41 城分级景点 + 车站/机场表 + 出租车计价表，示意/事实混标）；
+ * 攻略库在 travel-guides.js（演示数据）；AI 通道在 ai.js（DeepSeek/OpenRouter…，离线演示兜底）。
+ * 城际交通按距离估算但落位到具体车站/机场（STATIONS），接真实票务 API 后替换 intercityOptions；
+ * 打车费用 = 出租车计价表 + OSRM 公开路网里程（滴滴/哈罗无公开 API，预留适配位）。
  * 分天引擎：地理聚类（k-means）+ 容量平衡 + 每天独立求最优顺序。
  */
 'use strict';
@@ -91,6 +93,10 @@ const state = {
   step: 1,
   maxStep: 1,
   spotTier: 'all',
+  departPoint: null,     // 去车站/机场的出发点 {name, lat, lng, custom?}；null=住宿枢纽
+  boardStations: {},     // 用户手选的上/下车站，键 'from:hsr' / 'to:flight'
+  access: null,          // 接驳估算 {from:{taxi,transit,src}, to:{...}}；null=暂无
+  guideTab: 'food',
 };
 
 function hubOf(c) {
@@ -99,13 +105,194 @@ function hubOf(c) {
   return { name: '市中心（默认住宿）', lat: c.lat, lng: c.lng, isHub: true };
 }
 
+/* ================= 车站 / 接驳 / 打车估算 ================= */
+
+/* --- 出租车：计价表（TAXI_TARIFF）+ OSRM 公开路网真实里程。
+ * 滴滴 / 哈罗没有公开的估价 API（需企业签约），这里预留 RideHailingProvider 适配位：
+ * 未来拿到资质后，把 pairEstimate 里的 taxi 分支换成真实接口返回即可，UI 不用动。 --- */
+function tariffOf(cityName) {
+  return (TAXI_TARIFF.cities && TAXI_TARIFF.cities[cityName]) || TAXI_TARIFF.fallback;
+}
+function taxiFare(cityName, km) {
+  const t = tariffOf(cityName);
+  const mid = Math.min(km, t.farKm);
+  const cost = t.start + Math.max(0, mid - t.startKm) * t.perKm + Math.max(0, km - t.farKm) * t.farK;
+  return Math.max(t.start, Math.round(cost));
+}
+function taxiSync(cityName, km) {
+  return { min: km / 26 * 60 + 6, cost: taxiFare(cityName, km), km, src: '估算' };
+}
+function transitSync(km) { // 公交地铁启发式（无实时数据），长距离不展示（快线/城际难以估准）
+  return { min: Math.min(240, Math.max(10, km / 22 * 60 + 12)), cost: km > 10 ? 6 : 3, km, src: '估算' };
+}
+
+const osrmCache = new Map();
+async function osrmRoute(a, b) { // 免 key、支持浏览器跨域；失败回退直线估算
+  const key = pairKey(a, b);
+  if (osrmCache.has(key)) return osrmCache.get(key);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 4000);
+  try {
+    const r = await fetch(`https://router.project-osrm.org/route/v1/driving/${a.lng},${a.lat};${b.lng},${b.lat}?overview=false&alternatives=false`, { signal: ctrl.signal });
+    const data = await r.json();
+    if (data.code !== 'Ok' || !data.routes || !data.routes[0]) throw new Error('no route');
+    const res = { km: data.routes[0].distance / 1000, roadMin: data.routes[0].duration / 60 };
+    osrmCache.set(key, res);
+    return res;
+  } catch (e) {
+    osrmCache.set(key, null);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function pairEstimate(cityName, a, b) { // 单对点的打车/公交估算（先直线兜底，OSRM 到了再修正）
+  const km0 = roadKm(a, b);
+  const est = {
+    taxi: taxiSync(cityName, km0),
+    transit: transitSync(km0),
+    src: '估算',
+  };
+  const r = await osrmRoute(a, b);
+  if (r) {
+    est.src = 'OSRM 实际路网';
+    est.taxi = { min: r.roadMin + 6, cost: taxiFare(cityName, r.km), km: r.km, src: 'OSRM 实际路网' };
+    est.transit = transitSync(r.km);
+  }
+  return est;
+}
+
+const pairKey = (a, b) => `${a.lng.toFixed(4)},${a.lat.toFixed(4)}|${b.lng.toFixed(4)},${b.lat.toFixed(4)}`;
+const routeEst = new Map();      // pairKey -> pairEstimate 结果（全程共享缓存）
+let routesSeq = 0;               // 状态变更后丢弃过期的异步结果
+
+/* --- 车站/机场落位 --- */
+function stationsOf(cityName) { return STATIONS[cityName] || null; }
+function railStations(cityName) { const s = stationsOf(cityName); return s ? (s.rail || []) : []; }
+function airports(cityName) { const s = stationsOf(cityName); return s ? (s.airports || []) : []; }
+function pickStation(list, nearPt) { // 主枢纽优先（离出发点不太远时），否则就近
+  if (!list || !list.length) return null;
+  const main = list.find(s => s.main);
+  if (!nearPt) return main || list[0];
+  const nearest = list.reduce((m, s) => hav(nearPt, s) < hav(nearPt, m) ? s : m, list[0]);
+  if (main && hav(nearPt, main) - hav(nearPt, nearest) < 15) return main;
+  return nearest;
+}
+function stationListFor(modeId, cityName) {
+  if (modeId === 'flight') return airports(cityName);
+  if (modeId === 'hsr' || modeId === 'train') return railStations(cityName);
+  return [];
+}
+function chosenStation(modeId, side) { // side: 'from' 出发城上车 / 'to' 目的城下车
+  const city = side === 'from' ? state.from : state.to;
+  const list = stationListFor(modeId, city.name);
+  if (!list.length) return null;
+  const picked = state.boardStations[side + ':' + modeId];
+  if (picked) return list.find(s => s.name === picked.name) || pickStation(list, null);
+  return pickStation(list, side === 'from' ? departPointOf() : hubOf(city));
+}
+function stationFallback(modeId, cityName) { // 无站点数据时的兜底文案
+  const s = stationsOf(cityName);
+  if (s) {
+    if (modeId === 'flight' && s.airportNote) return s.airportNote;
+    if (modeId !== 'flight' && s.railNote) return s.railNote;
+  }
+  return '该市车站 / 机场数据待收录，按市中心估算接驳';
+}
+function departPointOf() {
+  return state.departPoint || hubOf(state.from);
+}
+
+/* --- 接驳估算（出发点→上车站；下车站→住宿地） --- */
+function accessPairs() {
+  const t = state.transport;
+  if (!t) return null;
+  return {
+    depPt: departPointOf(),
+    fromSt: chosenStation(t.id, 'from'),
+    toSt: chosenStation(t.id, 'to'),
+    destHub: hubOf(state.to),
+  };
+}
+function rebuildAccess() { // 同步基线（直线估算），OSRM 结果由 ensureRoutes 回填
+  const p = accessPairs();
+  if (!p) { state.access = null; return; }
+  const est = (cityName, a, b) => {
+    const cached = routeEst.get(pairKey(a, b));
+    if (cached) return cached;
+    const km = roadKm(a, b);
+    return { taxi: taxiSync(cityName, km), transit: transitSync(km), src: '估算' };
+  };
+  state.access = {
+    from: p.fromSt ? est(state.from.name, p.depPt, p.fromSt) : null,
+    to: p.toSt ? est(state.to.name, p.toSt, p.destHub) : null,
+  };
+}
+async function ensureRoutes() { // 批量拉真实路网，回来后按当前步骤重渲染
+  const order = getOrder();
+  const hub = hubOf(state.to);
+  const pairs = new Map();
+  order.forEach(dayIds => {
+    if (!dayIds.length) return;
+    const seq = [hub, ...dayIds.map(id => POIMAP[id]), hub];
+    for (let k = 1; k < seq.length; k++) {
+      const key = pairKey(seq[k - 1], seq[k]);
+      if (!routeEst.has(key)) pairs.set(key, [seq[k - 1], seq[k]]);
+    }
+  });
+  const p = accessPairs();
+  if (p) {
+    if (p.fromSt && !routeEst.has(pairKey(p.depPt, p.fromSt))) pairs.set(pairKey(p.depPt, p.fromSt), [p.depPt, p.fromSt]);
+    if (p.toSt && !routeEst.has(pairKey(p.toSt, p.destHub))) pairs.set(pairKey(p.toSt, p.destHub), [p.toSt, p.destHub]);
+  }
+  if (!pairs.size) return;
+  const seqId = ++routesSeq;
+  const results = await Promise.all(
+    [...pairs.entries()].map(async ([key, [a, b]]) =>
+      [key, state.transport ? await pairEstimate(state.to.name, a, b) : null]),
+  );
+  if (seqId !== routesSeq) return;
+  results.forEach(([key, est]) => { if (est) routeEst.set(key, est); });
+  rebuildAccess();
+  if (state.step === 2) renderTransport();
+  if (state.step >= 4) { renderTimeline(); drawRoute(false); }
+}
+
+/* 市内 leg 的方式选项：公式基线 + 已缓存的 OSRM 修正 */
+function legOptsFor(km, a, b) {
+  const opts = legOpts(km);
+  if (a && b) {
+    const e = routeEst.get(pairKey(a, b));
+    if (e) {
+      const taxi = opts.find(o => o.id === 'taxi');
+      if (taxi) { taxi.min = e.taxi.min; taxi.cost = e.taxi.cost; taxi.km = e.taxi.km; }
+      const tr = opts.find(o => o.id === 'transit');
+      if (tr) { tr.min = e.transit.min; tr.cost = e.transit.cost; }
+    }
+  }
+  return opts;
+}
+
+function accessTotals() {
+  const acc = state.access;
+  if (!acc) return { min: 0, cost: 0, fromOnly: 0 };
+  const from = acc.from || { taxi: { min: 0, cost: 0 } };
+  const to = acc.to || { taxi: { min: 0, cost: 0 } };
+  return {
+    min: from.taxi.min + to.taxi.min,
+    cost: from.taxi.cost + to.taxi.cost,
+    fromOnly: from.taxi.min,
+  };
+}
+
 /* ================= 行程窗口 ================= */
 
-// 去程推算：出发时刻 + 城际时长；跨天则第 1 天按晚间自由活动处理
+// 去程推算：出发时刻 + 接驳到车站 + 城际时长；跨天则第 1 天按晚间自由活动处理
 function arrivalInfo() {
   const dep = toMin(state.departTime);
   if (dep == null || !state.transport) return { spill: 0, arriveMin: null };
-  const total = dep + state.transport.min;
+  const total = dep + accessTotals().fromOnly + state.transport.min;
   return { spill: Math.floor(total / 1440), arriveMin: total % 1440 };
 }
 
@@ -158,13 +345,50 @@ function renderTransport() {
     if (o.id === popular) badges.push('<span class="tb">🔥 大多数人选择</span>');
     if (o.id === fastest.id) badges.push('<span class="tb fast">⚡ 最快</span>');
     if (o.id === cheapest.id) badges.push('<span class="tb cheap">💰 最省钱</span>');
+    // 车站/机场落位：高铁/飞机/普速在上车站卡片里直接写明
+    let note = o.note;
+    if (o.id === 'hsr' || o.id === 'flight' || o.id === 'train') {
+      const st = chosenStation(o.id, 'from');
+      note = st ? `📍 ${st.name} 上车${st.note ? ' · ' + st.note : ''}` : stationFallback(o.id, state.from.name);
+    }
     return `<button class="tcard${state.transport && state.transport.id === o.id ? ' on' : ''}" data-id="${o.id}">
       ${badges.join('')}
       <span class="ico">${o.icon}</span>
-      <span><span class="name">${o.name}</span><span class="note">${o.note}</span></span>
+      <span><span class="name">${o.name}</span><span class="note">${note}</span></span>
       <span><span class="time">${fmtDur(o.min)}</span><span class="cost" style="display:block">${fmtCost(o.cost)}</span></span>
     </button>`;
   }).join('');
+  renderAccessBar();
+}
+
+/* 接驳栏：出发点 → 上车站的打车/地铁两种走法 + 可切换的车站 */
+function renderAccessBar() {
+  const el = $('#accessBar');
+  const t = state.transport;
+  if (!t) { el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
+  const p = accessPairs();
+  const acc = state.access;
+  const st = chosenStation(t.id, 'from');
+  let h = `<div class="ab-head">📍 去车站怎么走（从 <b>${p.depPt.name}</b> 出发）</div>`;
+  if (st && acc && acc.from) {
+    const far = acc.from.taxi.km > 30;
+    h += `<div class="ab-line">${p.depPt.name} → <b>${st.name}</b>`
+      + ` <span class="ab-opt">🚕 打车约 ${fmtDur(acc.from.taxi.min)} · ${fmtCost(acc.from.taxi.cost)}</span>`
+      + (far
+        ? ' <span class="ab-opt muted">距离较远，建议打车 / 机场快线</span>'
+        : ` <span class="ab-opt">🚇 公交地铁约 ${fmtDur(acc.from.transit.min)} · ${fmtCost(acc.from.transit.cost)}</span>`)
+      + `</div>`;
+    const list = stationListFor(t.id, state.from.name);
+    if (list.length > 1) {
+      h += '<div class="ab-stations">换车站：' + list.map(s =>
+        `<button class="chip st-chip${s.name === st.name ? ' on' : ''}" data-side="from" data-name="${s.name}">${s.name}</button>`).join('') + '</div>';
+    }
+  } else {
+    h += `<div class="ab-line muted">${stationFallback(t.id, state.from.name)}</div>`;
+  }
+  h += `<div class="ab-note">费用按出租车计价表（${TAXI_TARIFF.updated}）估算${acc && acc.from && acc.from.src === 'OSRM 实际路网' ? '，里程来自 OSRM 公开路网' : ''}；滴滴 / 哈罗无公开估价 API，已预留 RideHailingProvider 适配位。</div>`;
+  el.innerHTML = h;
 }
 
 /* ================= 市内通勤方式（示意估算） ================= */
@@ -378,8 +602,8 @@ function computeTotals() {
     let moveMin = 0, moveCost = 0, km = 0, playMin = 0;
     for (let k = 1; k < seq.length; k++) {
       const d = roadKm(seq[k - 1], seq[k]);
-      km += d;
-      const opts = legOpts(d);
+      const opts = legOptsFor(d, seq[k - 1], seq[k]);
+      km += (routeEst.get(pairKey(seq[k - 1], seq[k])) || {}).taxi?.km || d;
       const o = opts.find(x => x.id === state.modes[legIdx]) || opts[opts.length - 1];
       moveMin += o.min; moveCost += o.cost;
       legIdx++;
@@ -394,12 +618,14 @@ function computeTotals() {
   let playMin = 0, ticket = 0;
   order.flat().forEach(id => { playMin += POIMAP[id].suggest_min; ticket += POIMAP[id].ticket; });
   const ic = state.transport || { min: 0, cost: 0 };
+  const acc = accessTotals();
   return {
     perDay,
     moveMin: sum('moveMin'), moveCost: sum('moveCost'), km: sum('km'),
     playMin, ticket: state.withTicket ? ticket : 0,
-    totalMin: ic.min + sum('moveMin') + playMin,
-    totalCost: ic.cost + sum('moveCost') + (state.withTicket ? ticket : 0),
+    accessMin: acc.min, accessCost: acc.cost,
+    totalMin: ic.min + acc.min + sum('moveMin') + playMin,
+    totalCost: ic.cost + acc.cost + sum('moveCost') + (state.withTicket ? ticket : 0),
   };
 }
 
@@ -434,6 +660,31 @@ function renderTripMeta() {
   $('#tripMeta').textContent = s;
 }
 
+/* 接驳 + 城际高亮条：第一天出发 / 最后一天返程 */
+function stripHTML(side) {
+  const t = state.transport;
+  const acc = state.access;
+  const p = accessPairs();
+  if (!t || !acc || !p) return '';
+  if (side === 'go') {
+    let h = '';
+    if (acc.from && p.fromSt) {
+      h += `<div class="ic-strip">🚕 接驳 ${p.depPt.name} → ${p.fromSt.name} · 打车约 ${fmtDur(acc.from.taxi.min)} / ${fmtCost(acc.from.taxi.cost)}`
+        + ` <i>｜ 🚇 公交约 ${fmtDur(acc.from.transit.min)}</i></div>`;
+    }
+    h += `<div class="ic-strip main">${t.icon} 城际 ${t.name} ${fmtDur(t.min)} · ${fmtCost(t.cost)}`
+      + `${p.fromSt ? ` · ${p.fromSt.name} 上车` : ''}${p.toSt ? ` → ${p.toSt.name}` : ''}</div>`;
+    return h;
+  }
+  // 返程：住宿地 → 下车站 → 回出发城
+  let h = '';
+  if (acc.to && p.toSt) {
+    h += `<div class="ic-strip">🚕 接驳 ${p.destHub.name} → ${p.toSt.name} · 打车约 ${fmtDur(acc.to.taxi.min)} / ${fmtCost(acc.to.taxi.cost)}</div>`;
+  }
+  h += `<div class="ic-strip main">${t.icon} 返程 ${t.name} ${fmtDur(t.min)}${p.toSt ? ` · ${p.toSt.name} 出发` : ''}</div>`;
+  return h;
+}
+
 function renderTimeline() {
   const order = getOrder();
   const hub = hubOf(state.to);
@@ -446,7 +697,10 @@ function renderTimeline() {
       + `<span class="d-date">${fmtDateCN(state.days[di])}</span>`
       + `<span class="d-sub">通勤 ${fmtDur(pd.moveMin)} · 游玩 ${fmtDur(pd.playMin)}</span>`
       + (pd.warn ? `<span class="d-warn">⚠ 超出时间窗约 ${fmtDur(pd.warn)}</span>` : '')
-      + `</div><div class="day-body">`;
+      + `</div>`
+      + (di === 0 ? stripHTML('go') : '')
+      + (di === order.length - 1 && state.returnTime ? stripHTML('back') : '')
+      + `<div class="day-body">`;
     if (!dayIds.length) {
       h += `<div class="t-rest">🌿 这一天自由活动，可在「自定义安排」里把景点挪过来</div></div></div>`;
       return;
@@ -455,7 +709,7 @@ function renderTimeline() {
     seq.forEach((p, k) => {
       if (k > 0) {
         const km = roadKm(seq[k - 1], p);
-        const opts = legOpts(km);
+        const opts = legOptsFor(km, seq[k - 1], p);
         h += `<div class="tleg"><div class="lbl">第 ${di + 1} 天 · 段 ${k} · 约 ${fmtKm(km)}</div><div class="modes">`
           + opts.map(o => `<button class="chip c-${o.id}${state.modes[legIdx] === o.id ? ' on' : ''}" data-leg="${legIdx}" data-mode="${o.id}">`
             + `${o.icon} ${o.name} ${fmtDur(o.min)}${o.cost ? ` <span class="c-cost">¥${Math.round(o.cost)}</span>` : ''}</button>`).join('')
@@ -485,6 +739,7 @@ function renderTimeline() {
   $('#timeline').innerHTML = h;
   $('#schemeMeta').textContent = schemeMetaText();
   renderTripMeta();
+  ensureRoutes();
 
   $('#totals').innerHTML = `
     ${ic2Row()}
@@ -495,7 +750,14 @@ function renderTimeline() {
 }
 function ic2Row() {
   const ic = state.transport;
-  return ic ? `<span class="t">城际 ${ic.icon} ${fmtDur(ic.min)} · ${fmtCost(ic.cost)}</span>` : '';
+  const acc = accessTotals();
+  if (!ic) return '';
+  let s = `<span class="t">城际 ${ic.icon} ${fmtDur(ic.min)} · ${fmtCost(ic.cost)}</span>`;
+  if (acc.min) {
+    const src = state.access && (state.access.from || state.access.to);
+    s += `<span class="t">接驳 ${fmtDur(acc.min)} · ${fmtCost(acc.cost)}<i class="est" title="${src ? src.src : ''}估算：出发点↔车站按出租车计价表</i></span>`;
+  }
+  return s;
 }
 
 /* ================= 景点选择 ================= */
@@ -708,7 +970,7 @@ function drawRoute(fit) {
       if (k === 0) return;
       // 段
       const km = roadKm(seq[k - 1], seq[k]);
-      const opts = legOpts(km);
+      const opts = legOptsFor(km, seq[k - 1], seq[k]);
       const chosen = opts.find(x => x.id === state.modes[legIdx]) || opts[opts.length - 1];
       const st = MODE_STYLE[chosen.id];
       const url = amapNav(seq[k - 1], seq[k], NAV_MODE[chosen.id]);
@@ -751,7 +1013,16 @@ function buildItineraryText() {
     ? `${fmtDateCN(state.days[0])} — ${fmtDateCN(state.days[state.days.length - 1])} · 共 ${state.days.length} 天`
     : `${fmtDateCN(state.days[0])} · 当天往返`;
   lines.push(`【行程单】${state.from.name} → ${state.to.name}（${range}）`);
-  if (ic) lines.push(`城际：${ic.name} 约 ${fmtDur(ic.min)} · ${fmtCost(ic.cost)}`);
+  if (ic) {
+    const p = accessPairs();
+    const acc = state.access;
+    let head = `城际：${ic.name} 约 ${fmtDur(ic.min)} · ${fmtCost(ic.cost)}`;
+    if (p && p.fromSt) head += `（${p.fromSt.name} 上车${p.toSt ? `，${p.toSt.name} 下车` : ''}）`;
+    lines.push(head);
+    if (acc && acc.from && p && p.fromSt) {
+      lines.push(`接驳：${p.depPt.name} → ${p.fromSt.name} 打车约 ${fmtDur(acc.from.taxi.min)} / ${fmtCost(acc.from.taxi.cost)}；${p.toSt ? `${p.toSt.name} → ${p.destHub.name} 打车约 ${fmtDur(acc.to.taxi.min)} / ${fmtCost(acc.to.taxi.cost)}` : ''}`);
+    }
+  }
   order.forEach((dayIds, di) => {
     lines.push(`── 第 ${di + 1} 天 · ${fmtDateCN(state.days[di])} ──`);
     if (!dayIds.length) { lines.push('（自由活动）'); return; }
@@ -759,7 +1030,7 @@ function buildItineraryText() {
     seq.forEach((p, k) => {
       if (k > 0) {
         const km = roadKm(seq[k - 1], p);
-        const opts = legOpts(km);
+        const opts = legOptsFor(km, seq[k - 1], p);
         const mode = flatModeOf(order, di, k);
         const chosen = opts.find(x => x.id === mode) || opts[opts.length - 1];
         lines.push(`  ├ ${chosen.name}约 ${fmtDur(chosen.min)}${chosen.cost ? `（¥${Math.round(chosen.cost)}）` : ''}`);
@@ -771,7 +1042,7 @@ function buildItineraryText() {
       }
     });
   });
-  lines.push(`市内通勤 ${fmtDur(t.moveMin)} / ${fmtKm(t.km)} · 门票 ${fmtCost(t.ticket)} · 全程约 ${fmtDur(t.totalMin)} · 合计 ${fmtCost(t.totalCost)}`);
+  lines.push(`市内通勤 ${fmtDur(t.moveMin)} / ${fmtKm(t.km)} · 门票 ${fmtCost(t.ticket)} · 全程约 ${fmtDur(t.totalMin)} · 合计 ${fmtCost(t.totalCost)}${t.accessCost ? `（含接驳 ${fmtCost(t.accessCost)}）` : ''}`);
   lines.push('（由跨城出行规划原型生成，时间为估算值）');
   return lines.join('\n');
 }
@@ -789,6 +1060,344 @@ function fallbackCopy(text, done) {
   document.body.appendChild(ta); ta.select();
   try { document.execCommand('copy'); done(); } catch (e) { toast('复制失败，请手动选择文本'); }
   document.body.removeChild(ta);
+}
+
+/* ================= 出发点（从哪出发去车站/机场） ================= */
+
+let departPointFilledFor = null;
+function fillDepartPoints() {
+  const sel = $('#departPointSel');
+  if (!sel) return;
+  // 同一座城市重复查询时保留用户已选的出发点
+  if (departPointFilledFor === state.from.name && sel.options.length) return;
+  departPointFilledFor = state.from.name;
+  const city = state.from;
+  const hub = hubOf(city);
+  const marks = CITY_LANDMARKS[city.name] || [];
+  sel.innerHTML = `<option value="hub">住宿地 / 默认：${hub.name}</option>`
+    + marks.map((m, i) => `<option value="m${i}">${m[0]}</option>`).join('')
+    + '<option value="custom">自定义出发点…</option>';
+  sel.value = 'hub';
+  $('#departPointWrap').classList.add('hidden');
+  state.departPoint = null;
+}
+
+function applyDepartPoint() {
+  const sel = $('#departPointSel');
+  if (!sel) return;
+  const city = state.from;
+  if (sel.value === 'hub') {
+    state.departPoint = null;
+    $('#departPointWrap').classList.add('hidden');
+  } else if (sel.value === 'custom') {
+    $('#departPointWrap').classList.remove('hidden');
+    const name = $('#departPointInput').value.trim();
+    state.departPoint = { name: name || '自定义出发点', lat: city.lat, lng: city.lng, custom: true };
+  } else {
+    const m = (CITY_LANDMARKS[city.name] || [])[+sel.value.slice(1)];
+    if (m) state.departPoint = { name: m[0], lng: m[1], lat: m[2] }; // CITY_LANDMARKS 行格式：[名称, 经度, 纬度]
+    $('#departPointWrap').classList.add('hidden');
+  }
+}
+
+// 出发点变化后的联动（已查询过时立刻重算接驳）
+function onDepartPointChange() {
+  applyDepartPoint();
+  if (!state.intercity) return;
+  state.boardStations = {};
+  rebuildAccess();
+  renderTransport(); // 任意步骤都刷新（元素在 DOM 里，只是卡片隐藏）
+  if (state.step >= 4) { renderTimeline(); drawRoute(false); }
+  ensureRoutes();
+}
+
+/* ================= 目的地情报面板（攻略库演示数据 + 检索 + AI 问答） ================= */
+
+const GUIDE_LS = city => `guide.ai.${city}`;
+function guideFor(city) {
+  if (GUIDE_RAW[city]) return { ...GUIDE_RAW[city], ai: false };
+  try {
+    const raw = localStorage.getItem(GUIDE_LS(city));
+    if (raw) return { ...JSON.parse(raw), ai: true };
+  } catch (e) { /* 缓存损坏当作没有 */ }
+  return null;
+}
+
+function retrieveGuide(city, q) { // 大字重合检索：问题与条目的二元组重合度排序
+  const g = guideFor(city);
+  if (!g) return [];
+  const grams = s => {
+    const t = (s || '').toLowerCase().replace(/\s/g, '');
+    const out = new Set();
+    for (let i = 0; i < t.length - 1; i++) out.add(t.slice(i, i + 2));
+    return out;
+  };
+  const qg = grams(q);
+  const items = [];
+  Object.entries({ food: '美食', stay: '住宿', tips: '贴士', ideas: '灵感' }).forEach(([k, cat]) => {
+    (g[k] || []).forEach(i => items.push({ cat, ...i, _g: grams(i.t + i.d) }));
+  });
+  const score = item => {
+    let s = 0;
+    qg.forEach(x => { if (item._g.has(x)) s++; });
+    return s;
+  };
+  return items.map(i => ({ ...i, score: score(i) }))
+    .filter(i => i.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 8);
+}
+
+function renderGuide() {
+  const city = state.to.name;
+  const g = guideFor(city);
+  const labels = { food: '🍜 美食', stay: '🏨 住宿', tips: '⚠️ 贴士', ideas: '💡 灵感' };
+  $$('#guideTabs button').forEach(b => {
+    b.classList.toggle('on', b.dataset.gtab === state.guideTab);
+    b.textContent = labels[b.dataset.gtab];
+  });
+  const banner = $('#guideBanner');
+  if (!g) {
+    banner.className = 'g-banner ai';
+    banner.textContent = '该城市暂无攻略条目；配置 AI 通道后可一键生成（生成结果仅供参考）。';
+    $('#guideList').innerHTML = '';
+    $('#guideGen').classList.remove('hidden');
+    return;
+  }
+  banner.className = 'g-banner' + (g.ai ? ' ai' : '');
+  banner.textContent = g.ai
+    ? '⚠ 以下内容由 AI 生成（本机缓存），仅供参考，出行前自行核实。'
+    : `演示数据：2026-10 联网检索公开攻略（知乎/携程社区/去哪儿/网易旅游等）整理；接入携程/同程开放平台后整体替换。`;
+  $('#guideGen').classList.add('hidden');
+  const kw = ($('#guideSearch').value || '').trim().toLowerCase();
+  let items = (g[state.guideTab] || []);
+  if (kw) items = items.filter(i => (i.t + i.d + (i.src || '')).toLowerCase().includes(kw));
+  $('#guideList').innerHTML = items.length
+    ? items.map(i => `<div class="g-item"><div class="g-t">${i.t}</div><div class="g-d">${i.d}</div>`
+      + `<div class="g-src">来源：${i.src || '公开攻略整理'}</div></div>`).join('')
+    : `<div class="g-item muted">没有匹配「${kw}」的条目，换个关键词，或直接在下方问 AI。</div>`;
+}
+
+async function aiGenGuide() {
+  if (!aiGuard()) return;
+  const city = state.to.name;
+  $('#guideGen').textContent = '生成中…';
+  const messages = [
+    { role: 'system', content: '你是旅行攻略编辑。为目的地城市生成简明攻略 JSON：{"food":[{"t":"条目名","d":"两句话说明"}],"stay":[...],"tips":[...],"ideas":[{"t":"行程名","d":"按天一句话"}]}。food/stay/tips 各 3-4 条，ideas 1-2 条；内容基于你的公开常识，不要编造具体店名价格，用「区域/类型」表述；只输出 JSON。' },
+    { role: 'user', content: `目的地：${city}` },
+  ];
+  const r = await AI.chat(messages, { task: 'guide', temperature: 0.5, maxTokens: 1200 });
+  $('#guideGen').textContent = '让 AI 生成该城市攻略';
+  if (!r.ok) return toast(`生成失败：${r.error.slice(0, 80)}`);
+  const data = AI.extractJSON(r.content);
+  if (!data || !data.food) return toast('AI 返回内容无法解析为攻略，请重试');
+  data.food = (data.food || []).map(i => ({ ...i, src: 'AI 生成，仅供参考' }));
+  data.stay = (data.stay || []).map(i => ({ ...i, src: 'AI 生成，仅供参考' }));
+  data.tips = (data.tips || []).map(i => ({ ...i, src: 'AI 生成，仅供参考' }));
+  data.ideas = (data.ideas || []).map(i => ({ ...i, src: 'AI 生成，仅供参考' }));
+  localStorage.setItem(GUIDE_LS(city), JSON.stringify(data));
+  renderGuide();
+  toast(`已生成「${city}」攻略（存本机缓存）`);
+}
+
+async function guideAsk() {
+  const q = $('#guideQ').value.trim();
+  if (!q) return toast('输入问题，比如「住哪个区域」「必吃什么」');
+  if (!aiGuard()) return;
+  const city = state.to.name;
+  const ctx = retrieveGuide(city, q);
+  const ctxText = ctx.map(i => `- [${i.cat}] ${i.t}：${i.d}（${i.src}）`).join('\n') || '（攻略库暂无该城市条目）';
+  const pois = (POIS[city] || []).map(p => `${p.name}（${tierLabel(p.tier)}；${p.note || ''}）`).join('；') || '（该城市暂无景点数据）';
+  openAiOut('🤖 目的地问答', '检索攻略库并生成回答…');
+  const messages = [
+    { role: 'system', content: '你是目的地攻略问答助手。只允许基于给定条目回答；引用条目时注明来源；条目里没有的信息直说「攻略库里没有，建议出行前自行核实」，禁止编造店名/价格/时刻。用中文简洁回答。' },
+    { role: 'user', content: `问题：${q}\n\n攻略库检索条目：\n${ctxText}\n\n已收录景点备注：\n${pois}` },
+  ];
+  const r = await AI.chat(messages, { task: 'qa', temperature: 0.4 });
+  setAiOut((r.ok ? r.content : `❌ ${r.error}`)
+    + `\n\n—— 检索命中 ${ctx.length} 条攻略条目${AI.cfg.provider === 'demo' ? '（离线演示模式未调用大模型）' : ''}`);
+}
+
+/* ================= AI 功能（通道见 ai.js；LLM 只转述结构化事实） ================= */
+
+function aiGuard() {
+  if (AI.ready()) return true;
+  openAiSettings();
+  toast('先在「AI 设置」里选一个通道（OpenRouter 有免费模型，或用离线演示）');
+  return false;
+}
+
+function openAiSettings() {
+  $('#aiProvider').innerHTML = Object.entries(AI_PROVIDERS)
+    .map(([k, p]) => `<option value="${k}">${p.label}</option>`).join('');
+  $('#aiProvider').value = AI.cfg.provider;
+  $('#aiBaseURL').value = AI.cfg.baseURL || AI_PROVIDERS[AI.cfg.provider].baseURL || '';
+  $('#aiModel').value = AI.cfg.model || AI_PROVIDERS[AI.cfg.provider].model || '';
+  $('#aiKey').value = AI.cfg.key || '';
+  $('#aiProviderHint').textContent = AI_PROVIDERS[AI.cfg.provider].hint;
+  $('#aiStatus').textContent = AI.statusText()
+    + (AI.server ? ' · 本地 serve.py 代理在线' : ' · 未检测到本地 serve.py（file:// 或纯静态打开）');
+  $('#aiModal').classList.remove('hidden');
+}
+
+async function testAi() {
+  $('#aiStatus').textContent = '测试连通中…';
+  const r = await AI.chat([{ role: 'user', content: '收到请只回复：ok' }], { task: 'test', maxTokens: 8 });
+  $('#aiStatus').textContent = r.ok
+    ? `✅ 连通正常（${r.via === 'demo' ? '离线演示' : r.via === 'proxy' ? '本地代理' : '直连'}）`
+    : `❌ ${r.error}`;
+}
+
+function openAiOut(title, body) {
+  $('#aiOutTitle').textContent = title;
+  $('#aiOutBody').textContent = body;
+  $('#aiOutBody').classList.add('loading');
+  $('#aiOut').classList.remove('hidden');
+}
+function setAiOut(text) {
+  $('#aiOutBody').textContent = text;
+  $('#aiOutBody').classList.remove('loading');
+}
+
+function buildPlanJSON() { // 只打包结构化事实给 LLM，遵守"表达层禁止新增事实"
+  const t = computeTotals();
+  const order = getOrder();
+  const hub = hubOf(state.to);
+  const p = accessPairs();
+  const acc = state.access;
+  return {
+    summary: {
+      from: state.from.name,
+      to: state.to.name,
+      departPoint: p ? p.depPt.name : null,
+      days: state.days.length,
+      dates: `${state.days[0]} ~ ${state.days[state.days.length - 1]}`,
+      intercity: state.transport ? {
+        mode: state.transport.name,
+        duration_min: Math.round(state.transport.min),
+        cost: Math.round(state.transport.cost),
+        board: p && p.fromSt ? p.fromSt.name : null,
+        alight: p && p.toSt ? p.toSt.name : null,
+      } : null,
+      access: acc ? {
+        depart_side: acc.from && p.fromSt ? `${p.depPt.name}→${p.fromSt.name} 打车${Math.round(acc.from.taxi.min)}分钟 ${acc.from.taxi.cost}元（${acc.from.src}）` : null,
+        arrive_side: acc.to && p.toSt ? `${p.toSt.name}→${p.destHub.name} 打车${Math.round(acc.to.taxi.min)}分钟 ${acc.to.taxi.cost}元（${acc.to.src}）` : null,
+      } : null,
+      total: { minutes: Math.round(t.totalMin), cost: Math.round(t.totalCost) },
+    },
+    dayLines: order.map((dayIds, di) => {
+      const seq = [hub, ...dayIds.map(id => POIMAP[id]), hub];
+      return {
+        day: di + 1,
+        date: state.days[di],
+        stops: dayIds.map(id => {
+          const s = POIMAP[id];
+          return { name: s.name, play_min: s.suggest_min, ticket: s.ticket, note: s.note || '' };
+        }),
+        legs: dayIds.length ? [...Array(dayIds.length + 1)].map((_, k) => {
+          const km = roadKm(seq[k], seq[k + 1]);
+          const o = legOptsFor(km, seq[k], seq[k + 1]).find(x => x.id === flatModeOf(order, di, k + 1)) || {};
+          return { from: seq[k].name, to: seq[k + 1].name, mode: o.name, min: Math.round(o.min || 0) };
+        }) : [],
+      };
+    }),
+  };
+}
+
+async function aiExplain() {
+  if (!aiGuard()) return;
+  if (!getOrder().flat().length) return toast('请先生成行程方案');
+  openAiOut('🤖 AI 行程讲解', '基于结构化行程生成讲解…');
+  const messages = [
+    { role: 'system', content: '你是行程讲解助手，用户给你一份结构化行程 JSON。硬性规则：只允许转述 JSON 里出现过的地点、时刻、金额、交通方式，禁止新增任何地点/车次/时刻/价格；用中文；先总述（天数/城际/总花费），再逐天讲为什么这样排（只能引用 JSON 里的 note 与顺序关系），最后给 2-3 条贴士（只能来自 note 字段）。' },
+    { role: 'user', content: JSON.stringify(buildPlanJSON()) },
+  ];
+  const r = await AI.chat(messages, { task: 'explain', temperature: 0.4 });
+  setAiOut((r.ok ? r.content : `❌ ${r.error}`)
+    + (AI.cfg.provider === 'demo' ? '\n\n（离线演示模式：内容由页面内结构化数据汇总生成，未调用大模型）' : ''));
+}
+
+/* --- 一句话生成行程 --- */
+function nlParseLocal(text) { // 离线兜底：只识别「城市 + N 天」
+  const days = (text.match(/(\d+)\s*天/) || [])[1];
+  const names = Object.keys(CITYMAP).sort((a, b) => b.length - a.length);
+  const city = names.find(n => text.includes(n));
+  return city ? { city, days: days ? +days : null } : null;
+}
+
+async function aiNLPlan() {
+  const text = $('#nlInput').value.trim();
+  if (!text) return toast('先描述需求，例：下周去成都玩 3 天，预算 3000');
+  if (!aiGuard()) return;
+  let slots = null;
+  if (AI.cfg.provider === 'demo') {
+    slots = nlParseLocal(text);
+    if (!slots) {
+      openAiOut('✨ 一句话规划', '离线模式只支持「城市 + 天数」格式（例：成都 3 天）。配置 AI 通道后可解析任意描述。');
+      return;
+    }
+  } else {
+    openAiOut('✨ 一句话规划', '解析需求中…');
+    const today = fmtISO(new Date());
+    const messages = [
+      { role: 'system', content: `把用户的一句旅行需求解析成 JSON，字段：city（中国地级市名，不带"市"后缀）、days（整数）、start_date（YYYY-MM-DD；今天是 ${today}，"下周/明天"等相对日期据此推算，无法确定则 null）、party（同行人描述或 null）、budget（每人预算数字或 null）、interests（兴趣标签数组，可为空数组）。只输出 JSON。` },
+      { role: 'user', content: text },
+    ];
+    const r = await AI.chat(messages, { task: 'nlplan', temperature: 0.1, maxTokens: 300 });
+    if (!r.ok) return setAiOut(`❌ ${r.error}`);
+    slots = AI.extractJSON(r.content);
+    if (!slots) return setAiOut('没能从回复里解析出 JSON，原始回复：\n' + r.content.slice(0, 500));
+  }
+  applySlots(slots, text);
+}
+
+function applySlots(slots, rawText) {
+  // 城市名归一：精确 → 去后缀 → 双向包含
+  let city = slots.city && CITYMAP[slots.city] ? slots.city : null;
+  if (!city && slots.city) {
+    const want = String(slots.city).replace(/(特别行政区|市|地区|盟|自治州)$/g, '');
+    city = Object.keys(CITYMAP).find(n => n === want)
+      || Object.keys(CITYMAP).find(n => n.includes(want) || want.includes(n));
+  }
+  if (!city) {
+    setAiOut(`没认出目的地「${slots.city || '（空）'}」。这句话是：${rawText}\n\n请手动在步骤①选择城市，或换个写法（例：下周去成都玩 3 天）。`);
+    return;
+  }
+  const days = Math.max(1, Math.min(14, +slots.days || 3));
+  let start = slots.start_date && /^\d{4}-\d{2}-\d{2}$/.test(slots.start_date) ? slots.start_date : fmtISO(new Date());
+  $('#toSel').value = city;
+  if (slots.from && CITYMAP[slots.from]) {
+    $('#fromSel').value = slots.from;
+    state.from = CITYMAP[slots.from];
+  }
+  state.to = CITYMAP[city];
+  $('#arriveDate').value = start;
+  $('#returnDate').value = addDaysStr(start, days - 1);
+  updateTripHint();
+  doQuery();
+  // 按兴趣预选景点：关键词匹配名称/备注/分级，匹配不到就按满意度取每天约 3 个
+  const list = POIS[city] || [];
+  if (list.length) {
+    const ints = Array.isArray(slots.interests) ? slots.interests.filter(Boolean) : [];
+    let picked = [];
+    if (ints.length) {
+      picked = list.filter(p => ints.some(kw =>
+        (p.name + (p.note || '') + tierLabel(p.tier)).includes(kw)));
+    }
+    if (picked.length < days) {
+      const top = list.slice().sort((a, b) => b.satisfaction - a.satisfaction)
+        .filter(p => !picked.includes(p))
+        .slice(0, Math.min(list.length, days * 3));
+      picked = picked.concat(top);
+    }
+    state.selected = picked.slice(0, days * 4).map(p => p.id);
+  }
+  renderSpots();
+  refreshSpotMarkers();
+  $('#btnPlan').click();
+  const party = slots.party ? ` · ${slots.party}` : '';
+  const budget = slots.budget ? ` · 预算 ${slots.budget}/人` : '';
+  setAiOut(`已按解析结果生成行程：\n目的地 ${city} · ${days} 天（${fmtDateCN(start)} 起）${party}${budget}\n兴趣：${(slots.interests || []).join('、') || '未指定'} → 已预选 ${state.selected.length} 个景点\n\n所有槽位都可以回到步骤① 修改后重新查询。`);
 }
 
 /* ================= 步骤切换 ================= */
@@ -845,8 +1454,12 @@ function doQuery() {
   state.transport = null;
   state.selected = [];
   state.spotTier = 'all';
+  fillDepartPoints();
+  state.boardStations = {};
   state.intercity = intercityOptions(state.from, state.to);
+  rebuildAccess();
   renderTransport();
+  ensureRoutes();
   $('#btnTo3').disabled = true;
   waitMap(() => { showIntercity(); showSpots(false); });
   gotoStep(2);
@@ -873,6 +1486,7 @@ function fillCitySelect(sel, def) {
 function bind() {
   fillCitySelect($('#fromSel'), state.from.name);
   fillCitySelect($('#toSel'), state.to.name);
+  fillDepartPoints();
   const today = fmtISO(new Date());
   $('#arriveDate').value = today;
   $('#returnDate').value = addDaysStr(today, 2);
@@ -909,7 +1523,9 @@ function bind() {
     const card = e.target.closest('.tcard');
     if (!card || card.classList.contains('off')) return;
     state.transport = state.intercity.list.find(o => o.id === card.dataset.id);
+    rebuildAccess();
     renderTransport();
+    ensureRoutes();
     $('#btnTo3').disabled = false;
   });
   $('#btnTo3').addEventListener('click', () => {
@@ -933,8 +1549,11 @@ function bind() {
       state.to = CITYMAP[name];
       state.transport = null;
       state.selected = [];
+      state.boardStations = {};
       state.intercity = intercityOptions(state.from, state.to);
+      rebuildAccess();
       renderTransport();
+      ensureRoutes();
       $('#btnTo3').disabled = true;
       toast(`目的地改为「${name}」，请重新选择城际交通`);
       waitMap(() => { showIntercity(); showSpots(false); });
@@ -1040,8 +1659,8 @@ function bind() {
     window.open(`https://uri.amap.com/navigation?from=${pp(seq[0])}&to=${pp(seq[seq.length - 1])}&via=${via}&mode=car&policy=1&src=trip_planner_demo&coordinate=gaode&callnative=0`, '_blank');
   });
 
-  // 返回按钮 + 步骤条
-  $$('.back').forEach(b => b.addEventListener('click', () => gotoStep(+b.dataset.goto)));
+  // 返回按钮 + 步骤条（注意：弹窗关闭按钮不带 data-goto，不会误触）
+  $$('.back[data-goto]').forEach(b => b.addEventListener('click', () => gotoStep(+b.dataset.goto)));
   $('#stepper').addEventListener('click', e => {
     const li = e.target.closest('li.can');
     if (li) gotoStep(+li.dataset.step);
@@ -1050,9 +1669,82 @@ function bind() {
   // 地图工具
   $('#btnFitSpots').addEventListener('click', () => waitMap(() => { showSpots(true); }));
   $('#btnFitRoute').addEventListener('click', () => waitMap(() => drawRoute(true)));
+
+  // 出发点（从哪出发去车站）
+  $('#departPointSel').addEventListener('change', onDepartPointChange);
+  $('#departPointInput').addEventListener('change', onDepartPointChange);
+  $('#accessBar').addEventListener('click', e => {
+    const chip = e.target.closest('.st-chip');
+    if (!chip || !state.transport) return;
+    const list = stationListFor(state.transport.id, state.from.name);
+    const st = list.find(s => s.name === chip.dataset.name);
+    if (st) state.boardStations['from:' + state.transport.id] = st;
+    rebuildAccess();
+    renderTransport();
+    if (state.step >= 4) { renderTimeline(); drawRoute(false); }
+    ensureRoutes();
+  });
+
+  // 步骤 3：目的地情报
+  $('#btnGuide').addEventListener('click', () => {
+    const p = $('#guidePanel');
+    p.classList.toggle('hidden');
+    if (!p.classList.contains('hidden')) renderGuide();
+  });
+  $('#guideTabs').addEventListener('click', e => {
+    const b = e.target.closest('button[data-gtab]');
+    if (!b) return;
+    state.guideTab = b.dataset.gtab;
+    renderGuide();
+  });
+  $('#guideSearch').addEventListener('input', renderGuide);
+  $('#guideGen').addEventListener('click', aiGenGuide);
+  $('#btnGuideAsk').addEventListener('click', guideAsk);
+  $('#guideQ').addEventListener('keydown', e => { if (e.key === 'Enter') guideAsk(); });
+
+  // AI 设置 / 输出弹窗
+  $('#btnAiSet').addEventListener('click', openAiSettings);
+  $('#aiProvider').addEventListener('change', () => {
+    const p = AI_PROVIDERS[$('#aiProvider').value];
+    $('#aiBaseURL').value = p.baseURL || '';
+    $('#aiModel').value = p.model || '';
+    $('#aiProviderHint').textContent = p.hint;
+  });
+  $('#aiSave').addEventListener('click', () => {
+    AI.cfg = {
+      provider: $('#aiProvider').value,
+      baseURL: $('#aiBaseURL').value.trim(),
+      model: $('#aiModel').value.trim(),
+      key: $('#aiKey').value.trim(),
+    };
+    AI.save();
+    $('#aiModal').classList.add('hidden');
+    updateAiBadge();
+    toast('AI 配置已保存到本机浏览器');
+  });
+  $('#aiTest').addEventListener('click', testAi);
+  $$('#aiModal [data-close], #aiOut [data-close]').forEach(b =>
+    b.addEventListener('click', () => b.closest('.modal').classList.add('hidden')));
+  $$('.modal').forEach(m => m.addEventListener('click', e => {
+    if (e.target === m) m.classList.add('hidden');
+  }));
+
+  // AI 讲解 / 一句话规划
+  $('#btnExplain').addEventListener('click', aiExplain);
+  $('#btnNL').addEventListener('click', aiNLPlan);
+  $('#nlInput').addEventListener('keydown', e => { if (e.key === 'Enter') aiNLPlan(); });
+}
+
+function updateAiBadge() {
+  const b = $('#aiBadge');
+  if (!b) return;
+  const names = { openrouter: 'OpenRouter', deepseek: 'DeepSeek', siliconflow: 'SiliconFlow', huaweimaas: '华为云 MaaS', demo: '离线演示' };
+  b.textContent = `✨ AI · ${names[AI.cfg.provider] || AI.cfg.provider}${AI.ready() ? '' : '（未配置）'}`;
 }
 
 /* ================= 启动 ================= */
 
 bind();
 gotoStep(1);
+updateAiBadge();
+AI.probeServer().then(updateAiBadge); // 检测本地 serve.py 代理是否在线

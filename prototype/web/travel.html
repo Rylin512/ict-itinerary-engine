@@ -20,7 +20,7 @@
   </div>
   <div class="badges">
     <span class="badge">华为 ICT 创新赛 · 赛题一</span>
-    <span class="badge ghost">原型 · 示意数据</span>
+    <button class="badge ghost link" id="btnAiSet" type="button">✨ <span id="aiBadge">AI 设置</span></button>
     <a class="badge ghost link" href="index.html">↩ 单城编排版</a>
   </div>
 </header>
@@ -39,6 +39,14 @@
     <!-- 步骤 1：出发地 / 目的地 -->
     <div class="card step" id="card1">
       <h2>① 从哪里出发，去哪里？</h2>
+      <div class="nl-box">
+        <label>✨ AI 一句话规划（可选）</label>
+        <div class="nl-row">
+          <input id="nlInput" placeholder="例：下周去成都玩 3 天，带爸妈，预算 3000">
+          <button id="btnNL" class="ghost-btn">生成</button>
+        </div>
+        <p class="hint">解析出城市 / 天数 / 兴趣后自动填充并预选景点；未配 AI 时支持「城市 + 天数」极简格式。</p>
+      </div>
       <div class="field-row">
         <div class="field">
           <label>出发地</label>
@@ -47,6 +55,13 @@
         <div class="field">
           <label>目的地</label>
           <select id="toSel"></select>
+        </div>
+      </div>
+      <div class="field">
+        <label>去车站 / 机场前，从哪出发？（出发城市内）</label>
+        <select id="departPointSel"></select>
+        <div id="departPointWrap" class="hidden" style="margin-top:8px">
+          <input id="departPointInput" placeholder="输入出发点，如：机场东、公司楼下（按市中心估算）">
         </div>
       </div>
       <div class="field">
@@ -94,8 +109,9 @@
         <button class="back" data-goto="1">← 改城市</button>
       </div>
       <p class="muted" id="distInfo"></p>
+      <div id="accessBar" class="access-bar hidden"></div>
       <div id="transportList" class="transport-list"></div>
-      <p class="hint">时间与价格按两地距离估算（含往返车站 / 机场的接驳），接入真实票务 API 后替换。</p>
+      <p class="hint">城际时间/票价按距离估算（车次票价以 12306 / 航司为准）；上车站与接驳时长来自内置车站表 + 路网估算，接入真实票务 API 后替换。</p>
       <button id="btnTo3" class="primary" disabled>下一步：挑选景点 →</button>
     </div>
 
@@ -107,9 +123,28 @@
       </div>
       <div class="pool-head">
         <span id="selInfo" class="muted">已选 0 个 · 游玩约 0 分钟</span>
-        <button id="btnClassic" class="ghost-btn">🔥 一键选入经典组合</button>
+        <span>
+          <button id="btnGuide" class="ghost-btn">📍 目的地情报</button>
+          <button id="btnClassic" class="ghost-btn">🔥 一键选入经典组合</button>
+        </span>
       </div>
       <div class="tier-filter" id="tierFilter"></div>
+      <div id="guidePanel" class="guide hidden">
+        <div class="g-banner" id="guideBanner"></div>
+        <div class="g-tabs" id="guideTabs">
+          <button data-gtab="food"></button>
+          <button data-gtab="stay"></button>
+          <button data-gtab="tips"></button>
+          <button data-gtab="ideas"></button>
+        </div>
+        <input id="guideSearch" placeholder="检索攻略，如：住宿 / 火锅 / 避坑 / 预约">
+        <div id="guideList" class="g-list"></div>
+        <div class="g-ask">
+          <input id="guideQ" placeholder="攻略库里没有的，直接问：带爸妈两天怎么排？">
+          <button id="btnGuideAsk" class="ghost-btn">问 AI</button>
+        </div>
+        <button id="guideGen" class="ghost-btn hidden" style="margin-top:8px">让 AI 生成该城市攻略</button>
+      </div>
       <div id="spotGrid" class="spot-grid"></div>
       <p class="hint">景点分四级：<b>🔥热门</b>（必去打卡）、<b>💰性价比</b>（免费或便宜但值得）、<b>🌿冷门</b>（本地人爱去）、<b>🧭待探索</b>（新晋网红 / 小众宝藏）。右侧地图即分布，点圆点也可勾选。</p>
       <button id="btnPlan" class="primary">生成行程规划 →</button>
@@ -141,6 +176,7 @@
       <div id="totals" class="totals"></div>
       <div class="action-row">
         <button id="btnCopy" class="ghost-btn">📋 复制行程单</button>
+        <button id="btnExplain" class="ghost-btn">🤖 AI 讲解</button>
         <button id="btnTo5" class="primary">地图与导航 →</button>
       </div>
     </div>
@@ -178,11 +214,56 @@
 </main>
 
 <footer class="foot">
-  页面为演示原型：城际交通时间/价格、市内通勤时长均为按距离的<b>估算值（示意数据）</b>；
-  景点坐标为近似值；底图 © 高德地图 / OpenStreetMap。算法与交互结构为真实实现。
+  页面为演示原型：城际交通时间/价格、市内通勤时长均为<b>估算值</b>；上车站/机场与出租车计价为公开资料整理（见数据文件来源标注）；
+  攻略面板为演示数据；景点坐标为近似值。底图 © 高德地图 / OpenStreetMap · 路网里程 © OSRM。
+  算法与交互结构为真实实现。打车费用为出租车计价估算——滴滴/哈罗无公开 API，已预留适配位。
 </footer>
 
 <div id="toast" class="toast hidden"></div>
+
+<!-- AI 设置弹窗 -->
+<div id="aiModal" class="modal hidden">
+  <div class="modal-card">
+    <div class="step-head">
+      <h2>✨ AI 通道设置</h2>
+      <button class="back" data-close type="button">✕ 关闭</button>
+    </div>
+    <p class="muted" id="aiStatus"></p>
+    <div class="field">
+      <label>通道</label>
+      <select id="aiProvider"></select>
+      <p class="hint" id="aiProviderHint"></p>
+    </div>
+    <div class="field">
+      <label>Base URL（OpenAI 兼容接口）</label>
+      <input id="aiBaseURL">
+    </div>
+    <div class="field">
+      <label>模型</label>
+      <input id="aiModel">
+    </div>
+    <div class="field">
+      <label>API Key（只存本机浏览器；留空则用本地 serve.py 的环境变量 key）</label>
+      <input id="aiKey" type="password" placeholder="sk-…">
+    </div>
+    <div class="action-row">
+      <button id="aiTest" class="ghost-btn">测试连通</button>
+      <button id="aiSave" class="primary">保存</button>
+    </div>
+    <p class="hint">推荐：OpenRouter 免费模型（浏览器直连，无需本地服务）；答辩现场断网用「离线演示」通道。key 永远不会写进代码仓库。</p>
+  </div>
+</div>
+
+<!-- AI 输出弹窗（讲解 / 问答 / 一句话规划结果） -->
+<div id="aiOut" class="modal hidden">
+  <div class="modal-card">
+    <div class="step-head">
+      <h2 id="aiOutTitle"></h2>
+      <button class="back" data-close type="button">✕ 关闭</button>
+    </div>
+    <div id="aiOutBody" class="ai-out"></div>
+  </div>
+</div>
 
 <script>
   // Leaflet 加载失败时回退到 unpkg
@@ -197,6 +278,8 @@
 </script>
 <script src="https://cdn.bootcdn.net/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="travel-data.js"></script>
+<script src="travel-guides.js"></script>
+<script src="ai.js"></script>
 <script src="travel.js"></script>
 </body>
 </html>
