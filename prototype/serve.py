@@ -247,6 +247,11 @@ class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB), **kwargs)
 
+    def end_headers(self):
+        # 演示工具：静态文件永远重新校验，避免浏览器缓存旧 JS 导致"改了没生效"
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
     def _send(self, obj, code=200):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
