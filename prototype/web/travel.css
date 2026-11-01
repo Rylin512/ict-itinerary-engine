@@ -23,12 +23,21 @@
 *{box-sizing:border-box}
 html,body{margin:0;padding:0}
 body{
-  background:linear-gradient(180deg,#eef2ec 0%,var(--bg) 320px);
+  background:
+    radial-gradient(1100px 380px at 88% -120px, rgba(74,124,111,.12), transparent 62%),
+    radial-gradient(900px 320px at -10% 240px, rgba(169,137,99,.07), transparent 60%),
+    linear-gradient(180deg,#eef2ec 0%,var(--bg) 320px);
+  background-attachment:fixed;
   color:var(--ink);
   font:15px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","HarmonyOS Sans SC","Microsoft YaHei",sans-serif;
   -webkit-font-smoothing:antialiased;
   letter-spacing:.1px;
 }
+::selection{background:#cfe2da}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:#d4d9d1;border-radius:8px;border:2px solid var(--bg)}
+::-webkit-scrollbar-thumb:hover{background:#c2c9c0}
+::-webkit-scrollbar-track{background:transparent}
 h1,h2{margin:0;font-weight:600}
 h2{font-size:15.5px;letter-spacing:.3px}
 button{font:inherit;color:inherit;cursor:pointer}
@@ -46,8 +55,10 @@ input,select{font:inherit;color:inherit}
 .brand{display:flex;align-items:center;gap:14px}
 .logo{
   width:44px;height:44px;border-radius:14px;flex:none;
-  background:var(--accent);color:#fff;display:grid;place-items:center;
+  background:linear-gradient(135deg,#55907f,var(--accent-deep));
+  color:#fff;display:grid;place-items:center;
   font-size:20px;font-weight:600;letter-spacing:1px;
+  box-shadow:0 6px 18px rgba(60,106,94,.28);
 }
 h1{font-size:21px;letter-spacing:1px}
 .sub{margin:3px 0 0;font-size:12.5px;color:var(--muted);letter-spacing:.3px}
@@ -77,7 +88,7 @@ h1{font-size:21px;letter-spacing:1px}
 }
 .stepper li.done{color:var(--accent);border-color:transparent;background:var(--accent-soft)}
 .stepper li.done i{background:transparent;color:var(--accent)}
-.stepper li.on{color:var(--ink);font-weight:600;border-color:var(--accent);background:var(--card)}
+.stepper li.on{color:var(--ink);font-weight:600;border-color:var(--accent);background:var(--card);box-shadow:var(--shadow)}
 .stepper li.on i{background:var(--accent);color:#fff}
 .stepper li.can{cursor:pointer}
 .stepper li.can:hover{border-color:var(--accent);color:var(--accent)}
@@ -112,11 +123,14 @@ select:focus,input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 
 
 .primary{
   width:100%;margin-top:8px;padding:12px 16px;border:0;border-radius:12px;
-  background:var(--accent);color:#fff;font-weight:600;font-size:14.5px;letter-spacing:1px;
+  background:linear-gradient(135deg,#55907f,var(--accent) 55%,var(--accent-deep));
+  color:#fff;font-weight:600;font-size:14.5px;letter-spacing:1px;
+  box-shadow:0 4px 14px rgba(60,106,94,.24);
   transition:.2s;
 }
-.primary:hover:not(:disabled){background:var(--accent-deep)}
-.primary:disabled{background:#cdd4cf;color:#fff;cursor:not-allowed}
+.primary:hover:not(:disabled){box-shadow:0 6px 20px rgba(60,106,94,.34);transform:translateY(-1px)}
+.primary:active:not(:disabled){transform:translateY(0)}
+.primary:disabled{background:#cdd4cf;color:#fff;cursor:not-allowed;box-shadow:none;transform:none}
 .ghost-btn{
   border:1px solid var(--line);background:var(--card);border-radius:10px;
   padding:8px 13px;font-size:13px;color:var(--ink);transition:.2s;
@@ -132,10 +146,18 @@ button.on.ghost-btn{background:var(--accent-soft);border-color:var(--accent);col
   border:1px solid var(--line);border-radius:14px;padding:13px 16px;background:var(--card);
   cursor:pointer;transition:.2s;position:relative;text-align:left;width:100%;
 }
-.tcard:hover{border-color:#cfd8d2}
-.tcard.on{border-color:var(--accent);background:var(--accent-soft)}
-.tcard.off{opacity:.42;cursor:not-allowed;background:#fafaf7}
-.tcard .ico{font-size:24px;text-align:center}
+.tcard:hover{border-color:#cfd8d2;transform:translateY(-1px);box-shadow:0 6px 18px rgba(47,53,48,.07)}
+.tcard.on{
+  border-color:var(--accent);background:var(--accent-soft);
+  box-shadow:0 0 0 1px var(--accent) inset, 0 8px 20px rgba(74,124,111,.10);
+}
+.tcard.off{opacity:.42;cursor:not-allowed;background:#fafaf7;transform:none;box-shadow:none}
+.tcard .ico{
+  font-size:23px;width:46px;height:46px;border-radius:13px;
+  background:#fbfcf9;border:1px solid var(--line-soft);
+  display:grid;place-items:center;
+}
+.tcard.on .ico{background:#fff;border-color:#dbe7e1}
 .tcard .name{display:block;font-weight:600;font-size:14px}
 .tcard .note{display:block;font-size:11.5px;color:var(--muted);margin-top:2px}
 .tcard .time{font-size:17px;font-weight:700;font-variant-numeric:tabular-nums}
@@ -170,8 +192,11 @@ button.on.ghost-btn{background:var(--accent-soft);border-color:var(--accent);col
   position:relative;text-align:left;background:var(--card);border:1px solid var(--line);
   border-radius:13px;padding:11px 12px;cursor:pointer;transition:.2s;
 }
-.spot:hover{border-color:#cfd8d2}
-.spot.on{border-color:var(--accent);background:var(--accent-soft)}
+.spot:hover{border-color:#cfd8d2;transform:translateY(-2px);box-shadow:0 6px 16px rgba(47,53,48,.08)}
+.spot.on{
+  border-color:var(--accent);background:var(--accent-soft);
+  box-shadow:0 0 0 1px var(--accent) inset;
+}
 .spot .nm{display:block;font-weight:600;font-size:13px;line-height:1.4;padding-right:16px}
 .spot .meta{font-size:11px;color:var(--muted);margin-top:4px;display:flex;gap:6px;flex-wrap:wrap}
 .spot .bar{display:block;height:3px;border-radius:2px;background:var(--line-soft);margin-top:8px;overflow:hidden}
@@ -221,7 +246,9 @@ button.on.ghost-btn{background:var(--accent-soft);border-color:var(--accent);col
 }
 .day-head{
   display:flex;align-items:center;gap:10px;flex-wrap:wrap;
-  padding:10px 16px;background:var(--accent-soft);border-bottom:1px solid var(--line);
+  padding:11px 16px;
+  background:linear-gradient(90deg,#eaf2ee, #f2f6f1 70%, #f7f9f4);
+  border-bottom:1px solid var(--line);
 }
 .day-head .d-num{
   background:var(--accent);color:#fff;padding:2px 12px;border-radius:999px;
@@ -271,7 +298,7 @@ button.on.ghost-btn{background:var(--accent-soft);border-color:var(--accent);col
   display:inline-flex;gap:5px;align-items:center;
 }
 .chip:hover{border-color:#cfd8d2}
-.chip.on{font-weight:600;color:#fff;border-color:transparent}
+.chip.on{font-weight:600;color:#fff;border-color:transparent;box-shadow:0 3px 10px rgba(47,53,48,.16)}
 .chip.on.c-walk{background:var(--walk)}
 .chip.on.c-bike{background:var(--bike)}
 .chip.on.c-transit{background:var(--transit)}
@@ -280,10 +307,16 @@ button.on.ghost-btn{background:var(--accent-soft);border-color:var(--accent);col
 
 .totals{display:flex;gap:9px;flex-wrap:wrap;margin:14px 0 4px}
 .totals .t{
-  background:var(--line-soft);border-radius:11px;padding:7px 12px;font-size:12px;color:var(--ink);
+  background:var(--line-soft);border-radius:11px;padding:7px 12px 7px 21px;font-size:12px;color:var(--ink);
+  position:relative;
+}
+.totals .t::before{
+  content:"";position:absolute;left:10px;top:50%;transform:translateY(-50%);
+  width:6px;height:6px;border-radius:50%;background:#c3ccc2;
 }
 .totals .t b{font-size:13px}
-.totals .t.total{background:var(--accent-soft);color:var(--accent-deep)}
+.totals .t.total{background:var(--accent-soft);color:var(--accent-deep);padding-left:12px}
+.totals .t.total::before{display:none}
 .action-row{display:flex;gap:10px;margin-top:12px}
 .action-row .primary{width:auto;flex:1}
 
@@ -300,7 +333,8 @@ button.on.ghost-btn{background:var(--accent-soft);border-color:var(--accent);col
 .map-toolbar .ghost-btn{box-shadow:var(--shadow)}
 .legend{
   position:absolute;left:12px;bottom:12px;z-index:600;
-  background:rgba(255,255,255,.94);border:1px solid var(--line);border-radius:12px;
+  background:rgba(255,255,255,.88);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  border:1px solid var(--line);border-radius:12px;
   padding:9px 13px;font-size:11.5px;color:var(--ink);
   display:grid;gap:5px;box-shadow:var(--shadow);
 }
@@ -312,7 +346,8 @@ button.on.ghost-btn{background:var(--accent-soft);border-color:var(--accent);col
 .sw.hub{width:10px;height:10px;border-radius:3px;background:#9aa098}
 .map-hint{
   position:absolute;left:58px;top:12px;z-index:600;max-width:250px;
-  background:rgba(255,255,255,.94);border:1px solid var(--line);border-radius:12px;
+  background:rgba(255,255,255,.88);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  border:1px solid var(--line);border-radius:12px;
   padding:8px 12px;font-size:11.5px;color:var(--muted);box-shadow:var(--shadow);
 }
 .pin-wrap{background:none;border:none}
@@ -367,12 +402,13 @@ button.on.ghost-btn{background:var(--accent-soft);border-color:var(--accent);col
 
 /* ---------- 步骤4：接驳 + 城际高亮条 ---------- */
 .ic-strip{
-  margin:0;padding:7px 16px;font-size:12px;color:var(--ink);
+  margin:0;padding:8px 16px;font-size:12px;color:var(--ink);
   border-bottom:1px solid var(--line-soft);background:#fbfcf9;
 }
 .ic-strip i{font-style:normal;color:var(--muted)}
 .ic-strip.main{
-  background:var(--sand-soft);color:var(--sand);font-weight:600;
+  background:linear-gradient(90deg,#f4ecdd,#f8f3e9 65%);
+  color:#8a6f4d;font-weight:600;
   border-bottom:1px solid var(--line);
 }
 .totals .est{font-style:normal;font-size:10.5px;opacity:.65;margin-left:4px}
@@ -404,13 +440,19 @@ button.on.ghost-btn{background:var(--accent-soft);border-color:var(--accent);col
 
 /* ---------- 弹窗（AI 设置 / AI 输出） ---------- */
 .modal{
-  position:fixed;inset:0;z-index:1500;background:rgba(47,53,48,.32);
+  position:fixed;inset:0;z-index:1500;
+  background:rgba(47,53,48,.30);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
   display:grid;place-items:center;padding:20px;
 }
 .modal-card{
   width:100%;max-width:520px;max-height:86vh;overflow:auto;
   background:var(--card);border:1px solid var(--line);border-radius:var(--r);
-  box-shadow:var(--shadow);padding:20px;
+  box-shadow:0 24px 60px rgba(47,53,48,.18);padding:20px;
+  animation:modal-in .22s cubic-bezier(.2,.8,.2,1);
+}
+@keyframes modal-in{
+  from{opacity:0;transform:translateY(10px) scale(.985)}
+  to{opacity:1;transform:translateY(0) scale(1)}
 }
 .ai-out{
   white-space:pre-wrap;font-size:13.5px;line-height:1.8;margin-top:6px;
@@ -422,6 +464,7 @@ button.on.ghost-btn{background:var(--accent-soft);border-color:var(--accent);col
 @media (max-width:1039px){
   .layout{grid-template-columns:1fr;padding-bottom:40px}
   .mapcard{order:-1;height:46vh;min-height:340px;position:relative;top:0}
+  .map-hint{left:12px;top:54px;max-width:62vw;font-size:11px}
   .stepper{overflow-x:auto;flex-wrap:nowrap;padding-bottom:8px}
   .stepper li{white-space:nowrap}
   .badges{justify-content:flex-start}
