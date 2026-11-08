@@ -234,17 +234,19 @@
       <select id="aiProvider"></select>
       <p class="hint" id="aiProviderHint"></p>
     </div>
-    <div class="field">
-      <label>Base URL（OpenAI 兼容接口）</label>
-      <input id="aiBaseURL">
-    </div>
-    <div class="field">
-      <label>模型</label>
-      <input id="aiModel">
-    </div>
-    <div class="field">
-      <label>API Key（只存本机浏览器；留空则用本地 serve.py 的环境变量 key）</label>
-      <input id="aiKey" type="password" placeholder="sk-…">
+    <div id="aiRealFields">
+      <div class="field">
+        <label>Base URL（OpenAI 兼容接口）</label>
+        <input id="aiBaseURL">
+      </div>
+      <div class="field">
+        <label>模型</label>
+        <input id="aiModel">
+      </div>
+      <div class="field">
+        <label>API Key（只存本机浏览器；留空则用本地 serve.py 的环境变量 key）</label>
+        <input id="aiKey" type="password" placeholder="sk-…">
+      </div>
     </div>
     <p class="hint" style="margin:16px 0 8px;font-weight:600;color:var(--ink)">百度地图开放平台</p>
     <p class="muted" id="baiduStatus"></p>
