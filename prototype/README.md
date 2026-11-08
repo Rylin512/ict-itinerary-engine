@@ -17,7 +17,7 @@ python serve.py --host 0.0.0.0      # 手机同一 WiFi：http://<你的IP>:8765
 
 **2026-10 新增：站点级接驳 + 打车估价 + 目的地攻略 + AI 通道。** 交通卡片落位到**具体机场/高铁站**（`STATIONS` 表，多站可切换，如成都天府 vs 双流），步骤①可选"从哪出发去车站"（热门城市预设地标含深圳机场东等，或自定义）；接驳段给出打车/公交两种估算并计入全程合计；打车费用 = 分城出租车计价表（`TAXI_TARIFF`）+ 百度路网里程（服务器端 AK，经 `serve.py /api/baidu/driving` 代理；未配 AK 回退 OSRM；滴滴/哈罗无公开 API，预留适配位）；步骤③新增「目的地情报」面板（美食/住宿/避坑/灵感，演示数据标注来源，支持检索与 AI 问答，未收录城市可 AI 生成）；AI 能力经 `ai.js` 接 DeepSeek 官方（走本地 `/api/llm` 代理）/OpenRouter 免费模型（浏览器直连）/华为云 MaaS，含**离线演示通道**兜底答辩断网——LLM 只转述结构化行程 JSON，禁止编造。
 
-**2026-11 新增：百度地图开放平台接入（双 AK）。** ① 服务器端 AK：环境变量 `BAIDU_MAP_AK`（或设置面板粘贴），serve.py 新增 `/api/baidu-config` 探测与 `/api/baidu/driving` 代理（direction/v2 驾车规划，`coord_type=gcj02`），打车/接驳里程优先用百度路网；② 浏览器端 AK：设置面板粘贴后底图从 OSM 切为百度地图 JS API GL（`web/baidu.js` 内置 GCJ-02→BD-09 闭合转换与 Leaflet/BMapGL 双后端地图抽象层）；③ 导航深链全部换百度 URI API（免 AK）。高德已全部移除。
+**2026-11 新增：百度地图开放平台接入（双 AK）。** ① 服务器端 AK：环境变量 `BAIDU_MAP_AK`（或设置面板粘贴），serve.py 新增 `/api/baidu-config` 探测、`/api/baidu/place` 地点检索与 `/api/baidu/route` 多模式路线代理（driving/walking/riding/transit，`coord_type=gcj02`），打车/接驳里程优先用百度路网；② **景点真实出入口**：用 place/v2 的 `detail_info.navi_location` 替换 POI 近似坐标；③ **目的地酒店搜索**：步骤①输入半截关键词（如「春熙路 全季」）→ 百度地点输入提示（suggestion）返回模糊候选 → 选中后再查地点详情取 `navi_location`，全程以酒店实际出入口为起终点（地点/详情请求走服务端优先闸门，不会被批量路线请求堵住）；④ **完整线路图**：逐段拉取所选通勤方式的真实道路折线并聚合绘制，不再画点到点直线；⑤ 浏览器端 AK：设置面板粘贴后底图从 OSM 切为百度地图 JS API GL（`web/baidu.js` 内置 GCJ-02→BD-09 闭合转换与 Leaflet/BMapGL 双后端地图抽象层），Leaflet 已本地化（`web/vendor/leaflet/`），OSM 瓦片不可达时自动切高德；⑥ 导航深链全部换百度 URI API（免 AK）。高德已全部移除。
 
 引擎的四个答辩点（网页演示已并入跨城页与录屏，命令行可复跑）：
 
@@ -32,8 +32,15 @@ serve.py 接口（只承载代理层）：
 |---|---|---|
 | GET | `/api/ai-config` | 探测本地 LLM 渠道（环境变量里有哪个 key） |
 | POST | `/api/llm` | OpenAI 兼容 LLM 代理（DeepSeek 官方不允许浏览器直连） |
-| GET | `/api/baidu-config` | 探测百度服务器端 AK 是否已配置 |
-| POST | `/api/baidu/driving` | 百度路线规划代理（direction/v2，2 QPS 节流） |
+| GET | `/api/baidu-config` | 探测百度 AK（服务器端是否就绪 + 浏览器端 AK） |
+| POST | `/api/baidu/place` | 百度地点检索（酒店 / 景点，返回 `navi_location` 出入口坐标） |
+| POST | `/api/baidu/suggest` | 百度地点输入提示（模糊搜索，返回候选供用户选择） |
+| POST | `/api/baidu/detail` | 百度地点详情（按 uid 取 `navi_location` 出入口） |
+| POST | `/api/baidu/route` | 百度多模式路线（driving/walking/riding/transit，返回真实道路折线） |
+| POST | `/api/baidu/driving` | 兼容旧接口：驾车路线（同样返回折线） |
+| GET | `/api/tiles/{z}/{x}/{y}.png` | 高德栅格瓦片代理（OSM 不可达时 Leaflet 底图兜底，内存缓存） |
+
+百度接口请求体：地点检索 `{query, region, pageSize}`；模糊搜索 `{query, region}`；详情 `{uid}`；路线 `{from:[lng,lat], to:[lng,lat], mode, city1?, city2?}`（GCJ-02，公交需城市名）。所有上游调用共用 `baidu_gate()` 全局 0.55s 闸门，保证不超过 2 次/秒；地点类请求带优先级，不会被行程的批量路线请求堵在后面。
 
 ### 命令行版
 

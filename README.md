@@ -122,10 +122,15 @@ serve.py 现在只承载**代理层**（跨城页完全前端化，编排引擎�
 |---|---|---|
 | GET | `/api/ai-config` | 本地可用的 LLM 渠道探测（key 只报有无，不回传内容） |
 | POST | `/api/llm` | OpenAI 兼容 LLM 代理（解决浏览器 CORS 与 key 不落盘） |
-| GET | `/api/baidu-config` | 百度服务器端 AK 探测 |
-| POST | `/api/baidu/driving` | 百度路线规划代理（direction/v2，全局 2 QPS 节流） |
+| GET | `/api/baidu-config` | 百度 AK 探测（服务器端就绪状态 + 浏览器端 AK） |
+| POST | `/api/baidu/place` | 百度地点检索（酒店 / 景点，返回出入口坐标） |
+| POST | `/api/baidu/suggest` | 百度地点输入提示（模糊搜索，返回候选列表供用户选择） |
+| POST | `/api/baidu/detail` | 百度地点详情（按 uid 取 `navi_location` 真实出入口） |
+| POST | `/api/baidu/route` | 百度多模式路线（driving/walking/riding/transit，返回真实折线） |
+| POST | `/api/baidu/driving` | 兼容旧接口：驾车路线（同样返回折线） |
+| GET | `/api/tiles/{z}/{x}/{y}.png` | 高德瓦片代理（OSM 不可达时的底图兜底） |
 
-LLM 请求体：`{baseURL, model, messages, temperature?, max_tokens?}`，key 经请求头 `X-Api-Key` 或对应环境变量提供；百度请求体：`{from:[lng,lat], to:[lng,lat]}`（GCJ-02），key 经 `X-Baidu-Ak` 或 `BAIDU_MAP_AK`。上游域名白名单见 `serve.py`（可用 `LLM_ALLOWED_HOSTS` 追加）。
+LLM 请求体：`{baseURL, model, messages, temperature?, max_tokens?}`，key 经请求头 `X-Api-Key` 或对应环境变量提供；百度地点检索请求体 `{query, region, pageSize}`，模糊搜索 `{query, region}`，详情 `{uid}`，路线 `{from:[lng,lat], to:[lng,lat], mode, city1?, city2?}`（GCJ-02，公交需城市名），key 经 `X-Baidu-Ak` 或 `BAIDU_MAP_AK`。所有百度上游调用共用 0.55s 全局闸门（≤2 QPS）；地点检索/模糊搜索/详情走优先队列，不会被批量路线请求堵住。上游域名白名单见 `serve.py`（可用 `LLM_ALLOWED_HOSTS` 追加）。
 
 ## 项目结构
 

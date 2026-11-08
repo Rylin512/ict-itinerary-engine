@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#f4f5f1">
 <title>跨城出行规划 · 原型</title>
-<link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
 <link rel="stylesheet" href="travel.css">
 </head>
 <body>
@@ -55,6 +55,15 @@
           <label>目的地</label>
           <select id="toSel"></select>
         </div>
+      </div>
+      <div class="field hotel-field">
+        <label>目的地酒店（可选，按酒店实际位置算路线）</label>
+        <div class="hotel-row">
+          <input id="hotelInput" placeholder="搜索酒店，如：春熙路 全季酒店">
+          <button id="btnHotelSearch" class="ghost-btn" type="button">搜索</button>
+        </div>
+        <div id="hotelResults" class="hotel-results hidden"></div>
+        <p class="hint" id="hotelHint">不指定时按市中心默认住宿估算；选定后全程以酒店出入口为起终点</p>
       </div>
       <div class="field">
         <label>去车站 / 机场前，从哪出发？（出发城市内）</label>
@@ -277,18 +286,7 @@
   </div>
 </div>
 
-<script>
-  // Leaflet 加载失败时回退到 unpkg
-  window.addEventListener('error', function (e) {
-    if (e && e.target && e.target.tagName === 'SCRIPT' && !window.__leafletFallback) {
-      window.__leafletFallback = true;
-      var s = document.createElement('script');
-      s.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
-      document.head.appendChild(s);
-    }
-  }, true);
-</script>
-<script src="https://cdn.bootcdn.net/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="vendor/leaflet/leaflet.js"></script>
 <script src="travel-data.js"></script>
 <script src="travel-guides.js"></script>
 <script src="ai.js"></script>
