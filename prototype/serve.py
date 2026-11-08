@@ -15,6 +15,8 @@
 
 LLM key 环境变量：DEEPSEEK_API_KEY / OPENROUTER_API_KEY / SILICONFLOW_API_KEY /
 HUAWEI_MAAS_API_KEY / LLM_API_KEY（通用兜底）；请求头 X-Api-Key 优先于环境变量。
+百度地图 AK：环境变量 BAIDU_MAP_AK 或请求头 X-Baidu-Ak，用于 /api/baidu/driving
+代理百度 Web 服务路线规划（浏览器跨域 / AK 不落盘）。
 """
 
 import json
@@ -243,6 +245,82 @@ def handle_llm(body, headers_in):
     return {"ok": True, "content": content, "usage": data.get("usage", {})}
 
 
+# ================= 百度地图开放平台代理（驾车路线规划 direction/v2） =================
+# 浏览器直连 Web 服务 API 会被 CORS 拦且 AK 暴露；本地 serve.py 转发。
+# AK 优先级：请求头 X-Baidu-Ak > 环境变量 BAIDU_MAP_AK。
+
+BAIDU_DRIVING_URL = "https://api.map.baidu.com/direction/v2/driving"
+
+
+def resolve_baidu_ak(header_key=None):
+    return header_key or os.environ.get("BAIDU_MAP_AK")
+
+
+def baidu_ready():
+    return bool(os.environ.get("BAIDU_MAP_AK"))
+
+
+def _coord(v):
+    """校验单个坐标值并格式化为百度要求的 6 位小数。"""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        raise ValueError(f"坐标非法：{v!r}")
+    if not (-180 <= x <= 180):
+        raise ValueError(f"坐标越界：{x}")
+    return f"{x:.6f}"
+
+
+def build_baidu_driving_url(ak, from_pair, to_pair):
+    """from/to 为 [lng, lat]（GCJ-02，页面数据坐标系）。纯函数便于单测。"""
+    if not ak:
+        raise ValueError("未找到百度 AK：请在设置面板填写，或为 serve.py 设置环境变量 BAIDU_MAP_AK")
+    if len(from_pair) != 2 or len(to_pair) != 2:
+        raise ValueError("from / to 需为 [经度, 纬度] 二元组")
+    o = ",".join(_coord(x) for x in from_pair)
+    d = ",".join(_coord(x) for x in to_pair)
+    return (f"{BAIDU_DRIVING_URL}?origin={o}&destination={d}"
+            f"&coord_type=gcj02&ret_coordtype=bd09ll&ak={ak}")
+
+
+def parse_baidu_driving(data):
+    """从 direction/v2 响应提取 (km, min)。status!=0 时抛 ValueError 带官方 message。"""
+    status = data.get("status")
+    if status != 0:
+        raise ValueError(f"百度返回 status={status}：{data.get('message', '未知错误')}")
+    routes = (data.get("result") or {}).get("routes") or []
+    if not routes:
+        raise ValueError("百度未返回可用路线（可能起终点不可达）")
+    route = routes[0]
+    return {"km": route["distance"] / 1000.0, "min": route["duration"] / 60.0}
+
+
+def handle_baidu_driving(body, headers_in):
+    try:
+        url = build_baidu_driving_url(
+            resolve_baidu_ak(headers_in.get("X-Baidu-Ak")),
+            body.get("from") or [], body.get("to") or [],
+        )
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:300]
+        return {"ok": False, "error": f"百度返回 {exc.code}：{detail}"}
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return {"ok": False, "error": f"百度连接失败：{exc}"}
+    except json.JSONDecodeError:
+        return {"ok": False, "error": "百度响应不是合法 JSON"}
+    try:
+        out = parse_baidu_driving(data)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, **out}
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB), **kwargs)
@@ -267,6 +345,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self._send(meta())
         if path == "/api/ai-config":
             return self._send(ai_config())
+        if path == "/api/baidu-config":
+            return self._send({"ready": baidu_ready(), "host": "api.map.baidu.com"})
         return super().do_GET()
 
     def do_POST(self):
@@ -276,6 +356,8 @@ class Handler(SimpleHTTPRequestHandler):
             path = self.path.split("?")[0]
             if path == "/api/llm":
                 return self._send(handle_llm(body, self.headers))
+            if path == "/api/baidu/driving":
+                return self._send(handle_baidu_driving(body, self.headers))
             with LOCK:
                 if path == "/api/plan":
                     return self._send(handle_plan(body))

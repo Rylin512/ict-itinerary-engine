@@ -189,9 +189,9 @@
       </div>
       <p class="muted">右侧地图已画出整条路线：<b>绿色虚线=步行、橙色虚线=骑行、蓝色=公交地铁、紫色=打车</b>，数字圆点为游玩顺序，🏨 为住宿/出发点。点任意一段线可查看该段并跳转导航。</p>
       <div class="action-row">
-        <button id="btnNavAll" class="primary">🧭 在高德地图导航全程</button>
+        <button id="btnNavAll" class="primary">🧭 在百度地图导航全程</button>
       </div>
-      <p class="hint">当前用直线示意路段 + 高德 URI 跳转实现；正式版将接入地图开放平台路径规划 API，逐段给出「几号线、哪个口出、步行多少米」（详见 技术设计-行程编排.md）。</p>
+      <p class="hint">路段为直线示意 + 百度地图 URI 跳转（免 AK）；配服务器端 AK 后打车里程改用百度路网规划。正式版将逐段给出「几号线、哪个口出、步行多少米」（详见 技术设计-行程编排.md）。</p>
     </div>
 
   </section>
@@ -215,7 +215,8 @@
 
 <footer class="foot">
   页面为演示原型：城际交通时间/价格、市内通勤时长均为<b>估算值</b>；上车站/机场与出租车计价为公开资料整理（见数据文件来源标注）；
-  攻略面板为演示数据；景点坐标为近似值。底图 © 高德地图 / OpenStreetMap · 路网里程 © OSRM。
+  攻略面板为演示数据；景点坐标为近似值（GCJ-02）。底图 © OpenStreetMap（配浏览器端 AK 后为百度地图）·
+  路网里程 © 百度地图开放平台（配服务器端 AK 后）/ OSRM。导航跳转经百度地图 URI API。
   算法与交互结构为真实实现。打车费用为出租车计价估算——滴滴/哈罗无公开 API，已预留适配位。
 </footer>
 
@@ -225,7 +226,7 @@
 <div id="aiModal" class="modal hidden">
   <div class="modal-card">
     <div class="step-head">
-      <h2>✨ AI 通道设置</h2>
+      <h2>✨ AI 与地图服务设置</h2>
       <button class="back" data-close type="button">✕ 关闭</button>
     </div>
     <p class="muted" id="aiStatus"></p>
@@ -246,11 +247,21 @@
       <label>API Key（只存本机浏览器；留空则用本地 serve.py 的环境变量 key）</label>
       <input id="aiKey" type="password" placeholder="sk-…">
     </div>
+    <p class="hint" style="margin:16px 0 8px;font-weight:600;color:var(--ink)">百度地图开放平台</p>
+    <p class="muted" id="baiduStatus"></p>
+    <div class="field">
+      <label>服务器端 AK（Web 服务 API，路网里程；留空则用 serve.py 环境变量 BAIDU_MAP_AK）</label>
+      <input id="baiduAk" type="password" placeholder="百度控制台 · 服务端 AK（IP 白名单）">
+    </div>
+    <div class="field">
+      <label>浏览器端 AK（JS API GL，地图展示层；保存并刷新后底图切换为百度地图）</label>
+      <input id="baiduAkBrowser" type="password" placeholder="百度控制台 · 浏览器端 AK（Referer 白名单）">
+    </div>
     <div class="action-row">
       <button id="aiTest" class="ghost-btn">测试连通</button>
       <button id="aiSave" class="primary">保存</button>
     </div>
-    <p class="hint">推荐：OpenRouter 免费模型（浏览器直连，无需本地服务）；答辩现场断网用「离线演示」通道。key 永远不会写进代码仓库。</p>
+    <p class="hint">推荐：OpenRouter 免费模型（浏览器直连，无需本地服务）；答辩现场断网用「离线演示」通道。两类 key 永远不会写进代码仓库。</p>
   </div>
 </div>
 
@@ -280,6 +291,7 @@
 <script src="travel-data.js"></script>
 <script src="travel-guides.js"></script>
 <script src="ai.js"></script>
+<script src="baidu.js"></script>
 <script src="travel.js"></script>
 </body>
 </html>

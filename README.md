@@ -32,7 +32,7 @@
 
 ## 项目简介
 
-小红书提供地点灵感，高德提供单段路线，本项目实现两者之间的**行程编排层**：
+小红书提供地点灵感，百度地图提供单段路线，本项目实现两者之间的**行程编排层**：
 
 - **输入**：用户勾选的景点，以及天数、同行人、节奏、预算、出发日等约束；
 - **处理**：在开放时间、最短停留、午餐窗、每日结束时间、步行上限、预算等硬约束下完成分天、排序与时间推进；
@@ -220,16 +220,18 @@ cd prototype && python -m unittest discover -s tests -t . -v
 | 景点池（41 城 300+ POI，坐标/票价/备注） | 事实（近似） | 公开信息整理，标注来源 | `web/travel-data.js` |
 | 车站 / 机场表（41 城机场 + 高铁站，坐标/枢纽/接驳备注） | 事实（近似） | 公开资料整理，updated 2026-10 | `web/travel-data.js` `STATIONS` |
 | 出租车计价表（18 城起步价/单价/远途费） | 事实（会浮动） | 各市发改委/交通部门公开信息，updated 2026-10 | `web/travel-data.js` `TAXI_TARIFF` |
-| 打车里程与时长 | 估算 | OSRM 公开路网（免 key），失败回退直线×1.35 | `web/travel.js` `osrmRoute()` |
+| 打车里程与时长 | 估算 | **百度地图开放平台 direction/v2**（服务器端 AK，经 serve.py 代理）→ 未配 AK 时回退 OSRM 公开路网 → 直线×1.35 | `web/baidu.js` + `serve.py /api/baidu/driving` |
 | 城际时间/票价、公交地铁接驳 | 估算 | 距离启发式公式 | `web/travel.js` |
 | 目的地攻略（美食/住宿/避坑/灵感） | 演示 | 2026-10 联网检索公开攻略整理，逐条标注来源 | `web/travel-guides.js` |
 | AI 讲解 / 问答 / 一句话规划 | 实时 | DeepSeek/OpenRouter/华为云 MaaS 等 OpenAI 兼容接口，只许转述结构化事实；离线演示通道兜底 | `web/ai.js` + `serve.py /api/llm` |
 
-说明：**滴滴 / 哈罗 / 小红书 / 携程 / 同程 / 抖音均无公开免费 API**（需企业签约），原型中分别以「出租车计价表 + OSRM」「本地攻略库 + LLM 检索问答」替代，并预留 `RideHailingProvider` / `GuideProvider` 适配位，拿到资质后换实现不动 UI。接入真实地图开放平台后，只需替换 `engine/providers/transit.py` 的 `route()`，调用方无需改动。
+说明：**滴滴 / 哈罗 / 小红书 / 携程 / 同程 / 抖音均无公开免费 API**（需企业签约），原型中分别以「出租车计价表 + 百度路网/OSRM」「本地攻略库 + LLM 检索问答」替代，并预留 `RideHailingProvider` / `GuideProvider` 适配位，拿到资质后换实现不动 UI。
+
+**百度地图开放平台接入（双 AK）**：① 服务器端 AK（Web 服务 API）配在 serve.py 环境变量 `BAIDU_MAP_AK`（或设置面板粘贴，经请求头 `X-Baidu-Ak` 传给本地代理），用于驾车路线规划取真实里程/时长；② 浏览器端 AK（JS API GL）在设置面板粘贴后，地图展示层由 OSM 切换为原生百度地图（坐标经 GCJ-02→BD-09 闭合公式转换）。导航跳转一律走百度地图 URI API（免 AK）。两类 AK 都不写进代码仓库。单城页公交路径规划接入时替换 `engine/providers/transit.py` 的 `route()`，调用方无需改动。
 
 ## 路线图
 
-- [ ] 接入高德 / 百度公交路径规划，统计字段完整率
+- [ ] 接入百度公交路径规划（direction/v2/transit），统计字段完整率
 - [ ] 将 `_best_order()` 替换为华为云 OptVerse 天筹求解器（VRP-TW）
 - [ ] `explain.py` 接入 MaaS，并增加「只许转述、不许编造站名」的约束测试
 - [ ] 鸿蒙 ArkTS 多端前端（手机 / 平板 / PC 2in1）

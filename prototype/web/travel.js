@@ -147,17 +147,18 @@ async function osrmRoute(a, b) { // 免 key、支持浏览器跨域；失败回�
   }
 }
 
-async function pairEstimate(cityName, a, b) { // 单对点的打车/公交估算（先直线兜底，OSRM 到了再修正）
+async function pairEstimate(cityName, a, b) { // 单对点估算：百度路网（需 AK）→ OSRM（免 key）→ 直线公式
   const km0 = roadKm(a, b);
   const est = {
     taxi: taxiSync(cityName, km0),
     transit: transitSync(km0),
     src: '估算',
   };
-  const r = await osrmRoute(a, b);
+  const baidu = await BAIDU.route(a, b);
+  const r = baidu || await osrmRoute(a, b);
   if (r) {
-    est.src = 'OSRM 实际路网';
-    est.taxi = { min: r.roadMin + 6, cost: taxiFare(cityName, r.km), km: r.km, src: 'OSRM 实际路网' };
+    est.src = baidu ? '百度地图路网' : 'OSRM 实际路网';
+    est.taxi = { min: r.roadMin + 6, cost: taxiFare(cityName, r.km), km: r.km, src: est.src };
     est.transit = transitSync(r.km);
   }
   return est;
@@ -387,7 +388,7 @@ function renderAccessBar() {
   } else {
     h += `<div class="ab-line muted">${stationFallback(t.id, state.from.name)}</div>`;
   }
-  h += `<div class="ab-note">费用按出租车计价表（${TAXI_TARIFF.updated}）估算${acc && acc.from && acc.from.src === 'OSRM 实际路网' ? '，里程来自 OSRM 公开路网' : ''}；滴滴 / 哈罗无公开估价 API，已预留 RideHailingProvider 适配位。</div>`;
+  h += `<div class="ab-note">费用按出租车计价表（${TAXI_TARIFF.updated}）估算${acc && acc.from && acc.from.src !== '估算' ? `，里程来自 ${acc.from.src}` : ''}；滴滴 / 哈罗无公开估价 API，已预留 RideHailingProvider 适配位。</div>`;
   el.innerHTML = h;
 }
 
@@ -823,11 +824,12 @@ function renderNotCovered() {
       </div>
     </div>`;
   if (map && gSpots) {
-    gSpots.clearLayers();
+    MAPAPI.clear(gSpots);
     Object.keys(spotMarkers).forEach(k => delete spotMarkers[k]);
-    L.circleMarker([state.to.lat, state.to.lng], {
-      radius: 8, color: '#fff', weight: 2, fillColor: '#a8671c', fillOpacity: 0.95,
-    }).addTo(gSpots).bindPopup(`<b>${state.to.name}</b><br>市中心（示意）`);
+    MAPAPI.dot(gSpots, state.to, {
+      fill: '#a8671c', px: 8,
+      popup: `<b>${state.to.name}</b><br>市中心（示意）`,
+    });
     fitPts([state.to]);
   }
 }
@@ -848,55 +850,168 @@ function toggleSpot(id) {
 /* ================= 地图 ================= */
 
 let map = null, gInter, gSpots, gRoute;
-const spotMarkers = {};
 const MODE_STYLE = {
   walk: { c: '#3d8b37', d: '2,7' },
   bike: { c: '#c07b12', d: '7,7' },
   transit: { c: '#2f6bb0', d: null },
   taxi: { c: '#6d4fa1', d: null },
 };
-const NAV_MODE = { walk: 'walk', bike: 'ride', transit: 'bus', taxi: 'car' };
+const NAV_MODE = { walk: 'walking', bike: 'riding', transit: 'transit', taxi: 'driving' };
 
-function initMap() {
-  if (map || typeof L === 'undefined') return false;
-  map = L.map('map', { zoomControl: true });
-  map.attributionControl.setPrefix(false);
-  const gaode = L.tileLayer('https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',
-    { subdomains: '1234', maxZoom: 18, attribution: '© 高德地图' });
-  const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' });
-  gaode.addTo(map);
-  L.control.layers({ '高德地图': gaode, 'OpenStreetMap': osm }, {}, { position: 'topleft' }).addTo(map);
-  gInter = L.layerGroup().addTo(map);
-  gSpots = L.layerGroup().addTo(map);
-  gRoute = L.layerGroup().addTo(map);
-  map.setView([32.8, 112.0], 4);
+/* ================= 地图抽象层：Leaflet(OSM) / 百度 JS API GL 双后端 =================
+ * 展示层后端选择：配置了浏览器端 AK 且 JS API GL 加载成功 → 百度地图；否则 OSM。
+ * 百度瓦片是 BD-09 自有投影无法直接叠在 Leaflet 上，故 GL 后端整体替换而非叠瓦片。
+ * 上层代码（showIntercity / showSpots / drawRoute …）只调 MAPAPI，不感知后端。
+ */
+let MAP_BACKEND = 'leaflet';    // 后端原生对象 map 在 _init* 里赋值
+
+const MAPAPI = {
+  async pickBackend() {
+    if (BAIDU.browserKey && location.protocol.startsWith('http')) {
+      if (await BAIDU.loadGL()) return 'baidu';
+    }
+    return 'leaflet';
+  },
+
+  init(backend) {
+    MAP_BACKEND = backend;
+    return backend === 'baidu' ? this._initBaidu() : this._initLeaflet();
+  },
+
+  fit(pts) {
+    if (!map || !pts.length) return;
+    if (MAP_BACKEND === 'baidu') {
+      map.setViewport(pts.map(p => BAIDU.bd(p)), { margins: [42, 42, 42, 42] });
+    } else {
+      map.fitBounds(L.latLngBounds(pts.map(p => [p.lat, p.lng])), { padding: [42, 42] });
+    }
+  },
+
+  clear(g) { g.clear(); },
+
+  // 两点连线（含弹窗）
+  line(g, a, b, { color, weight = 4, dash = null, opacity = 0.85, popup }) {
+    if (MAP_BACKEND === 'baidu') {
+      const pl = new BMapGL.Polyline([BAIDU.bd(a), BAIDU.bd(b)], {
+        strokeColor: color, strokeWeight: weight, strokeOpacity: opacity,
+        strokeStyle: dash ? 'dashed' : 'solid',
+      });
+      if (popup) pl.addEventListener('click', () => {
+        map.openInfoWindow(new BMapGL.InfoWindow(popup, { width: 260 }), BAIDU.bd(a));
+      });
+      map.addOverlay(pl); g.push(pl);
+    } else {
+      const pl = L.polyline([[a.lat, a.lng], [b.lat, b.lng]],
+        { color, weight, opacity, dashArray: dash || null })
+        .bindPopup(popup || '').addTo(g);
+    }
+  },
+
+  // HTML 图钉（复用 .pin 样式）
+  pin(g, pt, { html, w, h, popup, z = 0 }) {
+    if (MAP_BACKEND === 'baidu') {
+      const label = new BMapGL.Label(html, { position: BAIDU.bd(pt), offset: new BMapGL.Size(-w / 2, -h / 2) });
+      if (label.domElement) {
+        label.domElement.style.background = 'none';
+        label.domElement.style.border = 'none';
+        label.domElement.style.zIndex = String(500 + z);
+      }
+      const open = () => map.openInfoWindow(new BMapGL.InfoWindow(popup || '', { width: 260 }), BAIDU.bd(pt));
+      if (popup) {
+        label.addEventListener('click', open);
+        if (label.domElement) label.domElement.style.cursor = 'pointer';
+      }
+      map.addOverlay(label); g.push(label);
+    } else {
+      const mk = L.marker([pt.lat, pt.lng], {
+        icon: L.divIcon({ className: 'pin-wrap', html, iconSize: [w, h], iconAnchor: [w / 2, h / 2] }),
+        zIndexOffset: z,
+      }).addTo(g);
+      if (popup) mk.bindPopup(popup);
+    }
+  },
+
+  // 景点圆点（id 供勾选联动改色）
+  dot(g, pt, { fill, px = 7, popup, onClick }) {
+    let handle;
+    if (MAP_BACKEND === 'baidu') {
+      const c = new BMapGL.Circle(BAIDU.bd(pt), 130, {
+        strokeColor: '#fff', strokeWeight: 2, fillColor: fill, fillOpacity: 0.95,
+      });
+      if (popup) c.addEventListener('click', () => {
+        map.openInfoWindow(new BMapGL.InfoWindow(popup, { width: 260 }), BAIDU.bd(pt));
+      });
+      if (onClick) c.addEventListener('click', onClick);
+      map.addOverlay(c); g.push(c);
+      handle = c;
+    } else {
+      const m = L.circleMarker([pt.lat, pt.lng], {
+        radius: px, color: '#fff', weight: 2, fillColor: fill, fillOpacity: 0.95,
+      }).addTo(g);
+      if (popup) m.bindPopup(popup);
+      if (onClick) m.on('click', onClick);
+      handle = m;
+    }
+    return handle;
+  },
+
+  setDotFill(handle, fill) {
+    if (MAP_BACKEND === 'baidu') handle.setFillColor(fill);
+    else handle.setStyle({ fillColor: fill });
+  },
+
+  _initLeaflet() {
+    const m = L.map('map', { zoomControl: true });
+    m.attributionControl.setPrefix(false);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(m);
+    const mk = () => {
+      const group = L.layerGroup().addTo(m);
+      group.clear = () => group.clearLayers();
+      return group;
+    };
+    map = m;
+    return { inter: mk(), spots: mk(), route: mk() };
+  },
+
+  _initBaidu() {
+    const m = new BMapGL.Map('map', { enableMapClick: false });
+    m.centerAndZoom(new BMapGL.Point(112.0, 32.8), 5);
+    m.enableScrollWheelZoom(true);
+    const mk = () => { const arr = []; arr.clear = () => arr.forEach(o => m.removeOverlay(o)); return arr; };
+    map = m;
+    return { inter: mk(), spots: mk(), route: mk() };
+  },
+};
+
+async function initMap() {
+  if (map) return true;
+  const backend = await MAPAPI.pickBackend();
+  if (backend === 'leaflet' && typeof L === 'undefined') return false;
+  const groups = MAPAPI.init(backend);
+  gInter = groups.inter; gSpots = groups.spots; gRoute = groups.route;
   return true;
 }
 
 function waitMap(cb, tries = 40) {
-  if (initMap()) { cb(); return; }
-  if (tries <= 0) { toast('地图组件加载失败，请检查网络'); return; }
-  setTimeout(() => waitMap(cb, tries - 1), 150);
+  initMap().then(ok => {
+    if (ok) { cb(); return; }
+    if (tries <= 0) { toast('地图组件加载失败，请检查网络'); return; }
+    setTimeout(() => waitMap(cb, tries - 1), 150);
+  });
 }
 
-function fitPts(pts) {
-  if (!map || !pts.length) return;
-  const b = L.latLngBounds(pts.map(p => [p.lat, p.lng]));
-  map.fitBounds(b, { padding: [42, 42] });
-}
+function fitPts(pts) { MAPAPI.fit(pts); }
 
 function showIntercity() {
   if (!map) return;
-  gInter.clearLayers();
+  MAPAPI.clear(gInter);
   const a = state.from, b = state.to;
-  L.polyline([[a.lat, a.lng], [b.lat, b.lng]], { color: '#7a746b', weight: 2.5, dashArray: '6,8' })
-    .bindPopup(`<b>${a.name} → ${b.name}</b><br>直线约 ${Math.round(hav(a, b))} km`)
-    .addTo(gInter);
-  [a, b].forEach((c) => {
-    L.marker([c.lat, c.lng], {
-      icon: L.divIcon({ className: 'pin-wrap', html: `<div class="pin city">${c.name}</div>`, iconSize: [40, 22], iconAnchor: [20, 11] }),
-      zIndexOffset: 400,
-    }).addTo(gInter);
+  MAPAPI.line(gInter, a, b, {
+    color: '#7a746b', weight: 2.5, dash: '6,8',
+    popup: `<b>${a.name} → ${b.name}</b><br>直线约 ${Math.round(hav(a, b))} km`,
+  });
+  [a, b].forEach(c => {
+    MAPAPI.pin(gInter, c, { html: `<div class="pin city">${c.name}</div>`, w: 40, h: 22, z: 400 });
   });
   fitPts([a, b]);
 }
@@ -905,31 +1020,29 @@ function refreshSpotMarkers() {
   if (!map) return;
   Object.keys(spotMarkers).forEach(id => {
     const on = state.selected.includes(id);
-    spotMarkers[id].setStyle({ fillColor: on ? '#1f6b4f' : '#a8a093' });
+    MAPAPI.setDotFill(spotMarkers[id], on ? '#1f6b4f' : '#a8a093');
   });
 }
 
 function showSpots(fit) {
   if (!map) return;
-  gSpots.clearLayers();
+  MAPAPI.clear(gSpots);
   Object.keys(spotMarkers).forEach(k => delete spotMarkers[k]);
   const list = POIS[state.to.name] || [];
   if (!list.length) { renderNotCovered(); return; }
   list.forEach(p => {
-    const m = L.circleMarker([p.lat, p.lng], {
-      radius: 7, color: '#fff', weight: 2,
-      fillColor: state.selected.includes(p.id) ? '#1f6b4f' : '#a8a093', fillOpacity: 0.95,
-    }).addTo(gSpots);
-    m.bindPopup(`<b>${p.name}</b><br>${tierLabel(p.tier)} · ${p.ticket ? '门票 ¥' + p.ticket : '免费'} · 建议玩 ${fmtDur(p.suggest_min)}<br>${p.note || ''}`);
-    m.on('click', () => { if (state.step === 3) toggleSpot(p.id); });
+    const m = MAPAPI.dot(gSpots, p, {
+      fill: state.selected.includes(p.id) ? '#1f6b4f' : '#a8a093',
+      popup: `<b>${p.name}</b><br>${tierLabel(p.tier)} · ${p.ticket ? '门票 ¥' + p.ticket : '免费'} · 建议玩 ${fmtDur(p.suggest_min)}<br>${p.note || ''}`,
+      onClick: () => { if (state.step === 3) toggleSpot(p.id); },
+    });
     spotMarkers[p.id] = m;
   });
   if (fit) fitPts(list);
 }
 
-function amapNav(fromPt, toPt, mode) {
-  const pp = pt => `${pt.lng},${pt.lat},${encodeURIComponent(pt.name || '')}`;
-  return `https://uri.amap.com/navigation?from=${pp(fromPt)}&to=${pp(toPt)}&mode=${mode}&policy=1&src=trip_planner_demo&coordinate=gaode&callnative=0`;
+function baiduNav(fromPt, toPt, mode, region) { // 百度 URI API 深链（免 AK，见 baidu.js）
+  return BAIDU.navUrl(fromPt, toPt, mode, region || state.to.name);
 }
 
 // 扁平段号 → 该段两端的点
@@ -951,16 +1064,16 @@ function legEndpoints(legIdx) {
 
 function drawRoute(fit) {
   if (!map) return;
-  gRoute.clearLayers();
+  gRoute.clear();
   if (state.step < 4 || !state.selected.length) return;
   const order = getOrder();
   if (!order.flat().length) return;
   const hub = hubOf(state.to);
   const allPts = [hub];
-  L.marker([hub.lat, hub.lng], {
-    icon: L.divIcon({ className: 'pin-wrap', html: '<div class="pin hub">🏨</div>', iconSize: [26, 26], iconAnchor: [13, 13] }),
-    zIndexOffset: 500,
-  }).bindPopup(`<b>${hub.name}</b><br>住宿 / 出发点（全程同一酒店）`).addTo(gRoute);
+  MAPAPI.pin(gRoute, hub, {
+    html: '<div class="pin hub">🏨</div>', w: 26, h: 26, z: 500,
+    popup: `<b>${hub.name}</b><br>住宿 / 出发点（全程同一酒店）`,
+  });
   let legIdx = 0;
   order.forEach((dayIds, di) => {
     if (!dayIds.length) return; // 空天（自由活动）不画线不占段
@@ -973,18 +1086,18 @@ function drawRoute(fit) {
       const opts = legOptsFor(km, seq[k - 1], seq[k]);
       const chosen = opts.find(x => x.id === state.modes[legIdx]) || opts[opts.length - 1];
       const st = MODE_STYLE[chosen.id];
-      const url = amapNav(seq[k - 1], seq[k], NAV_MODE[chosen.id]);
-      L.polyline([[seq[k - 1].lat, seq[k - 1].lng], [seq[k].lat, seq[k].lng]],
-        { color: st.c, weight: 4, opacity: 0.85, dashArray: st.d })
-        .bindPopup(`<b>第 ${di + 1} 天 段 ${k} · ${chosen.name}</b><br>约 ${fmtDur(chosen.min)} · ${fmtCost(chosen.cost)} · ${fmtKm(km)}<br><a class="pop-nav" target="_blank" rel="noopener" href="${url}">🧭 在高德地图打开该段导航</a>`)
-        .addTo(gRoute);
+      const url = baiduNav(seq[k - 1], seq[k], NAV_MODE[chosen.id]);
+      MAPAPI.line(gRoute, seq[k - 1], seq[k], {
+        color: st.c, weight: 4, dash: st.d,
+        popup: `<b>第 ${di + 1} 天 段 ${k} · ${chosen.name}</b><br>约 ${fmtDur(chosen.min)} · ${fmtCost(chosen.cost)} · ${fmtKm(km)}<br><a class="pop-nav" target="_blank" rel="noopener" href="${url}">🧭 在百度地图打开该段导航</a>`,
+      });
       legIdx++;
       // 图钉
       if (seq[k].isHub) return;
-      L.marker([seq[k].lat, seq[k].lng], {
-        icon: L.divIcon({ className: 'pin-wrap', html: `<div class="pin">${di + 1}·${k}</div>`, iconSize: [30, 26], iconAnchor: [15, 13] }),
-        zIndexOffset: 500,
-      }).bindPopup(`<b>第 ${di + 1} 天 第 ${k} 站 · ${seq[k].name}</b><br>游玩约 ${fmtDur(seq[k].suggest_min)} · ${seq[k].ticket ? '门票 ¥' + seq[k].ticket : '免费'}`).addTo(gRoute);
+      MAPAPI.pin(gRoute, seq[k], {
+        html: `<div class="pin">${di + 1}·${k}</div>`, w: 30, h: 26, z: 500,
+        popup: `<b>第 ${di + 1} 天 第 ${k} 站 · ${seq[k].name}</b><br>游玩约 ${fmtDur(seq[k].suggest_min)} · ${seq[k].ticket ? '门票 ¥' + seq[k].ticket : '免费'}`,
+      });
     });
   });
   if (fit) fitPts(allPts);
@@ -1235,8 +1348,10 @@ function openAiSettings() {
   $('#aiModel').value = AI.cfg.model || AI_PROVIDERS[AI.cfg.provider].model || '';
   $('#aiKey').value = AI.cfg.key || '';
   $('#aiProviderHint').textContent = AI_PROVIDERS[AI.cfg.provider].hint;
-  $('#aiStatus').textContent = AI.statusText()
-    + (AI.server ? ' · 本地 serve.py 代理在线' : ' · 未检测到本地 serve.py（file:// 或纯静态打开）');
+  $('#baiduAk').value = BAIDU.key || '';
+  $('#baiduAkBrowser').value = BAIDU.browserKey || '';
+  $('#baiduStatus').textContent = BAIDU.serverStatus() + ' ｜ ' + BAIDU.browserStatus()
+    + (AI.server ? ' · 本地 serve.py 代理在线' : ' · 未检测到本地 serve.py');
   $('#aiModal').classList.remove('hidden');
 }
 
@@ -1418,7 +1533,7 @@ function gotoStep(n) {
     '两地位置与交通对比；地图上可先看目的地景点分布',
     '地图即景点分布：点圆点或左侧卡片勾选景点，可按分类筛选',
     '行程按天分组：图钉 = 天·序号，颜色对应通勤方式，点线段可跳转导航',
-    '点任意线段或图钉，可在高德地图中打开导航',
+    '点任意线段或图钉，可在百度地图中打开导航',
   ][n - 1];
   if (n === 2) showIntercity();
   if (n === 3) showSpots(false);
@@ -1609,13 +1724,13 @@ function bind() {
     const navleg = e.target.closest('.navleg');
     if (navleg) {
       const ep = legEndpoints(+navleg.dataset.leg);
-      if (ep) window.open(amapNav(ep[0], ep[1], NAV_MODE[state.modes[+navleg.dataset.leg]] || 'car'), '_blank');
+      if (ep) window.open(baiduNav(ep[0], ep[1], NAV_MODE[state.modes[+navleg.dataset.leg]] || 'driving'), '_blank');
       return;
     }
     const navspot = e.target.closest('.navspot');
     if (navspot) {
       const ep = legEndpoints(+navspot.dataset.leg);
-      if (ep) window.open(amapNav(ep[0], ep[1], NAV_MODE[state.modes[+navspot.dataset.leg]] || 'car'), '_blank');
+      if (ep) window.open(baiduNav(ep[0], ep[1], NAV_MODE[state.modes[+navspot.dataset.leg]] || 'driving'), '_blank');
       return;
     }
     const mv = e.target.closest('.mv[data-mv]');
@@ -1648,15 +1763,13 @@ function bind() {
 
   // 步骤 5
   $('#btnNavAll').addEventListener('click', () => {
-    // 全程导航：第 1 天酒店出发，串完最后一天，以最后一段方式收尾
+    // 全程导航：住宿地 → 最后一站（百度 URI API 不支持途经点，逐段导航用时间轴上的 🧭）
     const order = getOrder();
     const hub = hubOf(state.to);
     if (!order.flat().length) return toast('请先生成行程');
-    const pp = p => `${p.lng},${p.lat},${encodeURIComponent(p.name || '')}`;
     const seq = [hub];
     order.forEach(dayIds => dayIds.forEach(id => seq.push(POIMAP[id])));
-    const via = seq.slice(1, -1).map(p => `${p.lng},${p.lat}`).join(';');
-    window.open(`https://uri.amap.com/navigation?from=${pp(seq[0])}&to=${pp(seq[seq.length - 1])}&via=${via}&mode=car&policy=1&src=trip_planner_demo&coordinate=gaode&callnative=0`, '_blank');
+    window.open(baiduNav(seq[0], seq[seq.length - 1], 'driving'), '_blank');
   });
 
   // 返回按钮 + 步骤条（注意：弹窗关闭按钮不带 data-goto，不会误触）
@@ -1718,9 +1831,18 @@ function bind() {
       key: $('#aiKey').value.trim(),
     };
     AI.save();
+    const browserAkChanged = BAIDU.browserKey !== $('#baiduAkBrowser').value.trim();
+    BAIDU.key = $('#baiduAk').value.trim();
+    BAIDU.browserKey = $('#baiduAkBrowser').value.trim();
+    BAIDU.save();
     $('#aiModal').classList.add('hidden');
     updateAiBadge();
-    toast('AI 配置已保存到本机浏览器');
+    if (browserAkChanged && BAIDU.browserKey) {
+      toast('浏览器端 AK 已保存，刷新页面后底图切换为百度地图');
+    } else {
+      toast('配置已保存到本机浏览器');
+    }
+    if (BAIDU.key || BAIDU.ready) ensureRoutes(); // 新 AK 立刻升级路网估算
   });
   $('#aiTest').addEventListener('click', testAi);
   $$('#aiModal [data-close], #aiOut [data-close]').forEach(b =>
@@ -1748,3 +1870,6 @@ bind();
 gotoStep(1);
 updateAiBadge();
 AI.probeServer().then(updateAiBadge); // 检测本地 serve.py 代理是否在线
+BAIDU.probe().then(() => { // 百度 AK 就绪时，把估算升级为真实路网
+  if (BAIDU.ready && state.step >= 2) ensureRoutes();
+});
