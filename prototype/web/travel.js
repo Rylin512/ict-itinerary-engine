@@ -1350,10 +1350,14 @@ function openAiSettings() {
   $('#aiModel').value = AI.cfg.model || AI_PROVIDERS[AI.cfg.provider].model || '';
   $('#aiKey').value = AI.cfg.key || '';
   $('#aiProviderHint').textContent = AI_PROVIDERS[AI.cfg.provider].hint;
+  // 演示模式不需要任何凭据：隐藏真实通道字段，避免"填了却不生效"的误导
+  $('#aiRealFields').classList.toggle('hidden', AI.cfg.provider === 'demo');
   $('#baiduAk').value = BAIDU.key || '';
   $('#baiduAkBrowser').value = BAIDU.browserKey || '';
   $('#baiduStatus').textContent = BAIDU.serverStatus() + ' ｜ ' + BAIDU.browserStatus()
     + (AI.server ? ' · 本地 serve.py 代理在线' : ' · 未检测到本地 serve.py');
+  $('#aiStatus').textContent = AI.statusText()
+    + (AI.server ? ' · 本地 serve.py 代理在线' : ' · 未检测到本地 serve.py（file:// 或纯静态打开）');
   $('#aiModal').classList.remove('hidden');
 }
 
@@ -1824,13 +1828,16 @@ function bind() {
     $('#aiBaseURL').value = p.baseURL || '';
     $('#aiModel').value = p.model || '';
     $('#aiProviderHint').textContent = p.hint;
+    $('#aiRealFields').classList.toggle('hidden', p === AI_PROVIDERS.demo);
   });
   $('#aiSave').addEventListener('click', () => {
+    const provider = $('#aiProvider').value;
     AI.cfg = {
-      provider: $('#aiProvider').value,
-      baseURL: $('#aiBaseURL').value.trim(),
-      model: $('#aiModel').value.trim(),
-      key: $('#aiKey').value.trim(),
+      provider,
+      // 演示模式不存凭据：清掉残留，杜绝"看起来配好了实际是演示"的误导
+      baseURL: provider === 'demo' ? '' : $('#aiBaseURL').value.trim(),
+      model: provider === 'demo' ? '' : $('#aiModel').value.trim(),
+      key: provider === 'demo' ? '' : $('#aiKey').value.trim(),
     };
     AI.save();
     const browserAkChanged = BAIDU.browserKey !== $('#baiduAkBrowser').value.trim();
@@ -1842,7 +1849,7 @@ function bind() {
     if (browserAkChanged && BAIDU.browserKey) {
       toast('浏览器端 AK 已保存，刷新页面后底图切换为百度地图');
     } else {
-      toast('配置已保存到本机浏览器');
+      toast(provider === 'demo' ? '已切换为离线演示模式（不联网）' : '配置已保存到本机浏览器');
     }
     if (BAIDU.key || BAIDU.ready) ensureRoutes(); // 新 AK 立刻升级路网估算
   });
