@@ -7,12 +7,7 @@
 
 把一组景点和约束（天数、同行人、节奏、预算、出发日）排成一份**真正走得完**的行程：每个点几点到、待多久、坐几号线、从哪个口出、走多少米、几点收工，并由独立校验器重推时间轴确认可行性。
 
-> 华为 ICT 创新赛（2026—2027）赛题一「基于华为云产品打造 AI 创新应用」参赛原型，当前为成都单城演示。
-
-<p align="center">
-  <img src="prototype/shot-desktop.png" alt="桌面端界面" width="720">
-  <img src="prototype/shot-mobile.png" alt="移动端界面" width="210">
-</p>
+> 华为 ICT 创新赛（2026—2027）赛题一「基于华为云产品打造 AI 创新应用」参赛原型。Web 产品为**跨城出行规划页**（全国地级市），单城编排引擎保留为 Python 命令行演示。
 
 ## 目录
 
@@ -44,23 +39,28 @@
 
 | 能力 | 说明 |
 |---|---|
-| 需求 → 行程 | 修改天数、同行人、节奏、预算或出发日，立即重新求解；原型实测约 12 ms |
-| 选点即算代价 | 勾选或取消一个景点，返回交通时间、步行距离、车费变化；约 5 ms |
-| 出口级描述 | 「2 号线往一品天下方向 2 站 → 从 B 口出站，步行 150 米」 |
-| 时间可行性 | 独立校验器从 09:00 重推时间轴，不依赖编排器的自述；回归测试 0 违规 |
-| 排不下会说明 | 不硬塞景点，明确告知舍弃了什么以及可选的替代方案 |
-| 局部重排 | 某天下雨时只重排该天，其余天保持不变 |
-| 跨城出行规划 | 全国 339 个地级行政区可选（含港澳，不含台湾）；41 城深度收录 304 个景点，按 🔥热门 / 💰性价比 / 🌿冷门 / 🧭待探索 四级分类；出发/返程时间段可选（精确到时刻，自动压缩首尾两天游玩窗口）；**行程按天分组**——地理聚类分天 + 容量平衡 + 每天独立最优排序，逐段通勤方式可切换、支持跨天挪动（`travel.html` + `travel-data.js`） |
+| 跨城出行规划（Web 主产品） | 全国 339 个地级行政区可选（含港澳，不含台湾）；41 城深度收录 304 个景点，按 🔥热门 / 💰性价比 / 🌿冷门 / 🧭待探索 四级分类；出发/返程时间段可选（精确到时刻，自动压缩首尾两天游玩窗口）；**行程按天分组**——地理聚类分天 + 容量平衡 + 每天独立最优排序，逐段通勤方式可切换、支持跨天挪动；交通落位到具体机场/高铁站 + 接驳估算 + 分城打车计价（`travel.html`） |
+| AI 能力 | DeepSeek / OpenRouter / 华为云 MaaS 等通道：一句话生成行程、行程讲解（只转述结构化事实）、目的地攻略问答（`ai.js` + `serve.py /api/llm`） |
+| 需求 → 行程（引擎，CLI 演示） | 修改天数、同行人、节奏、预算或出发日，立即重新求解；原型实测约 12 ms（`run_demo.py`） |
+| 选点即算代价（引擎） | 勾选或取消一个景点，返回交通时间、步行距离、车费变化；约 5 ms |
+| 出口级描述（引擎） | 「2 号线往一品天下方向 2 站 → 从 B 口出站，步行 150 米」 |
+| 时间可行性（引擎） | 独立校验器从 09:00 重推时间轴，不依赖编排器的自述；回归测试 0 违规 |
+| 排不下会说明（引擎） | 不硬塞景点，明确告知舍弃了什么以及可选的替代方案 |
+| 局部重排（引擎） | 某天下雨时只重排该天，其余天保持不变 |
 
 ## 系统架构
 
 ```mermaid
 flowchart TD
-    W["web/ 单页前端<br/>桌面 / 移动端自适应"] -->|HTTP / JSON| S["serve.py<br/>Python 标准库 HTTP 服务"]
-    S --> P["planner.py<br/>编排层：分天、排序、时间推进"]
-    P --> T["providers/transit.py<br/>交通事实层：步行 / 地铁 / 公交 / 出口"]
-    P --> V["validator.py<br/>独立校验层：重推时间轴"]
-    P --> E["explain.py<br/>表达层：结构化行程转文案"]
+    W["web/travel.html 跨城规划页<br/>景点选择 · 分天编排 · 地图"] --> S["serve.py<br/>静态托管 + 代理层"]
+    S --> B["百度地图开放平台<br/>direction/v2 路网里程（服务器端 AK）"]
+    S --> O["OSRM 公开路网<br/>未配 AK 时回退"]
+    S --> L["LLM（DeepSeek / OpenRouter / 华为云 MaaS）<br/>讲解 · 问答 · 一句话规划"]
+    subgraph engine["engine/ 单城编排引擎（CLI 演示 + 回归测试）"]
+        P["planner.py 编排层"] --> T["providers/transit.py 交通事实层"]
+        P --> V["validator.py 独立校验层"]
+        P --> E["explain.py 表达层"]
+    end
 ```
 
 各层的真实化路径：
@@ -88,7 +88,7 @@ cd ict-itinerary-engine/prototype
 python serve.py
 ```
 
-浏览器打开 <http://127.0.0.1:8765>。默认端口为 8765，被占用时自动顺延，也可通过 `--port` 指定。
+浏览器打开 <http://127.0.0.1:8765>（自动跳转到跨城规划页 `/travel.html`）。默认端口为 8765，被占用时自动顺延，也可通过 `--port` 指定。
 
 局域网内用手机访问：
 
@@ -96,7 +96,7 @@ python serve.py
 python serve.py --host 0.0.0.0
 ```
 
-跨城出行规划页：<http://127.0.0.1:8765/travel.html>——出发地/目的地覆盖全国地级市；可选出发/返程时间段（只填日期或精确到时刻均可）；41 个城市深度收录（含小红书热门点位：泉州蟳埔簪花、阿那亚孤独图书馆、榕江村超、阿勒泰、景德镇陶溪川等），景点分四级；生成按天分组的行程（先去哪后去哪、每天怎么走、每段通勤可挑选），其余城市可查交通并推荐最近可规划城市。
+可选增强：设置环境变量 `BAIDU_MAP_AK`（服务器端 AK）后打车/接驳里程来自百度真实路网；页面右上角 ✨ 设置里可粘贴 AI key 与百度浏览器端 AK（切换原生百度底图）。
 
 ### 命令行演示
 
@@ -116,42 +116,16 @@ python -m unittest discover -s tests -t . -v
 
 ## API 接口
 
+serve.py 现在只承载**代理层**（跨城页完全前端化，编排引擎走命令行）：
+
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/meta` | 景点池与默认参数 |
-| POST | `/api/plan` | 生成整份行程 |
-| POST | `/api/toggle` | 勾选或取消一个景点，返回新行程与代价 diff |
-| POST | `/api/replan` | 局部重排某一天（例如雨天） |
 | GET | `/api/ai-config` | 本地可用的 LLM 渠道探测（key 只报有无，不回传内容） |
 | POST | `/api/llm` | OpenAI 兼容 LLM 代理（解决浏览器 CORS 与 key 不落盘） |
+| GET | `/api/baidu-config` | 百度服务器端 AK 探测 |
+| POST | `/api/baidu/driving` | 百度路线规划代理（direction/v2，全局 2 QPS 节流） |
 
-`/api/plan` 请求示例：
-
-```bash
-curl -s -X POST http://127.0.0.1:8765/api/plan \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "ids": ["kuanzhai", "wuhou", "jinli", "jinsha"],
-    "days": 2,
-    "party": "老人",
-    "pace": "标准",
-    "budget": 1500,
-    "start_weekday": 6
-  }'
-```
-
-通用请求字段：
-
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| `ids` | `string[]` | 景点 ID 列表，可从 `/api/meta` 获取 |
-| `days` | `int` | 天数，1–5，默认 3 |
-| `party` | `string` | 同行人：`成人` / `老人` / `带娃` |
-| `pace` | `string` | 节奏：`轻松` / `标准` / `紧凑` |
-| `budget` | `number` | 预算（元） |
-| `start_weekday` | `int` | 出发日，1=周一 … 7=周日 |
-
-`/api/toggle` 额外接收 `pid`（景点 ID）；`/api/replan` 额外接收 `day`（第几天）与 `mode`（默认 `rain`）。响应包含 `trip`（行程 JSON）和 `violations`（独立校验违规列表）。
+LLM 请求体：`{baseURL, model, messages, temperature?, max_tokens?}`，key 经请求头 `X-Api-Key` 或对应环境变量提供；百度请求体：`{from:[lng,lat], to:[lng,lat]}`（GCJ-02），key 经 `X-Baidu-Ak` 或 `BAIDU_MAP_AK`。上游域名白名单见 `serve.py`（可用 `LLM_ALLOWED_HOSTS` 追加）。
 
 ## 项目结构
 
@@ -162,9 +136,9 @@ curl -s -X POST http://127.0.0.1:8765/api/plan \
 │   ├── 方案蓝图.md              赛题解读、产品定位、华为云选型、12 周计划
 │   └── 技术设计-行程编排.md      分层职责、约束建模、行程 JSON、验收标准
 ├── prototype/
-│   ├── serve.py                 HTTP 服务 + 四个 JSON 接口
-│   ├── run_demo.py              命令行演示
-│   ├── web/                     前端页面（单城编排 index.html；跨城规划 travel.html）
+│   ├── serve.py                 静态托管跨城页 + LLM/百度代理
+│   ├── run_demo.py              命令行演示（单城编排引擎）
+│   ├── web/                     跨城规划页（travel.html + travel.js/data/css/guides + ai.js + baidu.js）
 │   ├── engine/                  编排引擎
 │   │   ├── models.py            数据模型（时间统一为整数分钟）
 │   │   ├── planner.py           编排层：分天、排序、时间推进、增量重算
@@ -173,7 +147,7 @@ curl -s -X POST http://127.0.0.1:8765/api/plan \
 │   │   ├── serialize.py         前端 JSON 契约
 │   │   ├── providers/transit.py 交通事实层
 │   │   └── data/                成都景点与地铁示意数据
-│   └── tests/test_engine.py     回归测试（含 HTTP 契约测试）
+│   └── tests/                   引擎回归 + 代理单测（LLM / 百度）
 ├── ruff.toml                    lint 规则
 └── README.md
 ```
