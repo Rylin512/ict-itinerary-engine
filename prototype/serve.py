@@ -23,6 +23,7 @@ import json
 import os
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -251,6 +252,20 @@ def handle_llm(body, headers_in):
 
 BAIDU_DRIVING_URL = "https://api.map.baidu.com/direction/v2/driving"
 
+# 个人认证 AK 的路线规划限 2 次/秒：代理层全局节流，相邻上游调用间隔 ≥0.55s。
+# 多个前端并发请求在闸门前排队，保证任何时刻都不会超限。
+BAIDU_MIN_INTERVAL = 0.55
+_BAIDU_GATE_LOCK = threading.Lock()
+_BAIDU_LAST_CALL = [0.0]
+
+
+def baidu_gate():
+    with _BAIDU_GATE_LOCK:
+        wait = _BAIDU_LAST_CALL[0] + BAIDU_MIN_INTERVAL - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        _BAIDU_LAST_CALL[0] = time.monotonic()
+
 
 def resolve_baidu_ak(header_key=None):
     return header_key or os.environ.get("BAIDU_MAP_AK")
@@ -304,6 +319,7 @@ def handle_baidu_driving(body, headers_in):
         )
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
+    baidu_gate()  # 2 QPS 全局节流（并发请求在此排队）
     try:
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
         with urllib.request.urlopen(req, timeout=15) as resp:
