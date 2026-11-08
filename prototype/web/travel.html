@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#f4f5f1">
 <title>跨城出行规划 · 原型</title>
-<link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
 <link rel="stylesheet" href="travel.css">
 </head>
 <body>
@@ -56,12 +56,25 @@
           <select id="toSel"></select>
         </div>
       </div>
-      <div class="field">
-        <label>去车站 / 机场前，从哪出发？（出发城市内）</label>
-        <select id="departPointSel"></select>
-        <div id="departPointWrap" class="hidden" style="margin-top:8px">
-          <input id="departPointInput" placeholder="输入出发点，如：机场东、公司楼下（按市中心估算）">
+      <div class="field hotel-field">
+        <label>目的地酒店（可选，按酒店实际位置算路线）</label>
+        <div class="hotel-row">
+          <input id="hotelInput" placeholder="搜索酒店，如：春熙路 全季酒店">
+          <button id="btnHotelSearch" class="ghost-btn" type="button">搜索</button>
         </div>
+        <div id="hotelResults" class="hotel-results hidden"></div>
+        <p class="hint" id="hotelHint">不指定时按市中心默认住宿估算；选定后全程以酒店出入口为起终点</p>
+      </div>
+      <div class="field depart-field">
+        <label>去车站 / 机场前，从哪出发？（出发城市内）</label>
+        <div class="poi-row">
+          <input id="departPointInput" placeholder="搜索出发点，如：天府机场、春熙路">
+          <button id="btnDepartSearch" class="ghost-btn" type="button">搜索</button>
+        </div>
+        <div id="departPointResults" class="poi-results hidden"></div>
+        <div id="departPointQuick" class="poi-quick"></div>
+        <div id="departPointPicked" class="poi-picked hidden"></div>
+        <p class="hint" id="departPointHint">默认从住宿地 / 市中心出发；也可输入任意地点并选中候选，按百度地图实际位置计算接驳。</p>
       </div>
       <div class="field">
         <label>热门目的地（一键查询）</label>
@@ -110,7 +123,28 @@
       <p class="muted" id="distInfo"></p>
       <div id="accessBar" class="access-bar hidden"></div>
       <div id="transportList" class="transport-list"></div>
-      <p class="hint">城际时间/票价按距离估算（车次票价以 12306 / 航司为准）；上车站与接驳时长来自内置车站表 + 路网估算，接入真实票务 API 后替换。</p>
+      <div id="stationPanel" class="station-panel hidden">
+        <div class="station-block">
+          <div class="station-title" id="fromStationTitle">🛫 出发城市 · 上车站 / 机场</div>
+          <div class="poi-row">
+            <input id="fromStationInput" placeholder="搜索出发城市的火车站 / 机场">
+            <button id="btnFromStationSearch" class="ghost-btn" type="button">搜索</button>
+          </div>
+          <div id="fromStationResults" class="poi-results hidden"></div>
+          <div id="fromStationChips" class="poi-quick"></div>
+        </div>
+        <div class="station-block">
+          <div class="station-title" id="toStationTitle">🛬 目的城市 · 下车站 / 机场</div>
+          <div class="poi-row">
+            <input id="toStationInput" placeholder="搜索目的城市的火车站 / 机场">
+            <button id="btnToStationSearch" class="ghost-btn" type="button">搜索</button>
+          </div>
+          <div id="toStationResults" class="poi-results hidden"></div>
+          <div id="toStationChips" class="poi-quick"></div>
+        </div>
+        <p class="hint station-hint">火车站来自 12306 免费车站库（本机缓存 7 天），机场优先用内置数据；只有内置没有的站点才会请求百度，且结果会缓存。搜索后可选任意车站 / 机场，接驳里程按所选站点重算。</p>
+      </div>
+      <p class="hint">城际时间/票价按距离估算（车次票价以 12306 / 航司为准）；上车站与接驳时长来自车站库 + 路网估算，接入真实票务 API 后替换。</p>
       <button id="btnTo3" class="primary" disabled>下一步：挑选景点 →</button>
     </div>
 
@@ -167,7 +201,7 @@
       </div>
       <div class="preset-row">
         <span class="muted">通勤快捷键：</span>
-        <button class="ghost-btn sm" data-preset="smart">智能组合</button>
+        <button class="ghost-btn sm" data-preset="smart" title="逐段对比步行 / 骑行 / 公交地铁 / 打车的百度实时时长，选最快组合">⚡ 最快组合</button>
         <button class="ghost-btn sm" data-preset="taxi">全程打车</button>
         <button class="ghost-btn sm" data-preset="transit">全程公交地铁</button>
       </div>
@@ -186,11 +220,11 @@
         <h2>⑤ 地图导航（雏形）</h2>
         <button class="back" data-goto="4">← 改方案</button>
       </div>
-      <p class="muted">右侧地图已画出整条路线：<b>绿色虚线=步行、橙色虚线=骑行、蓝色=公交地铁、紫色=打车</b>，数字圆点为游玩顺序，🏨 为住宿/出发点。点任意一段线可查看该段并跳转导航。</p>
+      <p class="muted">右侧地图已画出整条路线：<b>不同颜色 = 不同天数</b>，线型区分方式（点线=步行、长虚线=骑行、实线=公交地铁、疏虚线=打车），同一天颜色相同、多天自动换色，避免线路叠在一起看不清。数字圆点为游玩顺序，🏨 为住宿/出发点。点任意一段线可查看该段并跳转导航。</p>
       <div class="action-row">
         <button id="btnNavAll" class="primary">🧭 在百度地图导航全程</button>
       </div>
-      <p class="hint">路段为直线示意 + 百度地图 URI 跳转（免 AK）；配服务器端 AK 后打车里程改用百度路网规划。正式版将逐段给出「几号线、哪个口出、步行多少米」（详见 技术设计-行程编排.md）。</p>
+      <p class="hint">「⚡ 最快组合」会逐段对比步行 / 骑行 / 公交地铁 / 打车的百度实时时长，交通方式可以每段不同；公交地铁段自带步行接驳，时间轴会显示换乘组成。详细道路折线加载完成前，地图先用直线示意。</p>
     </div>
 
   </section>
@@ -209,6 +243,10 @@
       <div><i class="sw hub"></i>住宿/出发点</div>
     </div>
     <div id="mapHint" class="map-hint">选择城市后，这里展示两地位置与景点分布</div>
+    <div id="routeLoading" class="route-loading hidden" role="status" aria-live="polite">
+      <span class="rl-spin" aria-hidden="true"></span>
+      <span id="routeLoadingText">正在加载详细路线</span>
+    </div>
   </aside>
 </main>
 
@@ -216,6 +254,7 @@
   页面为演示原型：城际交通时间/价格、市内通勤时长均为<b>估算值</b>；上车站/机场与出租车计价为公开资料整理（见数据文件来源标注）；
   攻略面板为演示数据；景点坐标为近似值（GCJ-02）。底图 © OpenStreetMap（配浏览器端 AK 后为百度地图）·
   路网里程 © 百度地图开放平台（配服务器端 AK 后）/ OSRM。导航跳转经百度地图 URI API。
+  站点/机场/景点候补数据来自 OpenStreetMap（Nominatim / Overpass，ODbL 许可）与 12306 公开车站库，不占百度配额。
   算法与交互结构为真实实现。打车费用为出租车计价估算——滴滴/哈罗无公开 API，已预留适配位。
 </footer>
 
@@ -258,6 +297,15 @@
       <label>浏览器端 AK（JS API GL，地图展示层；保存并刷新后底图切换为百度地图）</label>
       <input id="baiduAkBrowser" type="password" placeholder="百度控制台 · 浏览器端 AK（Referer 白名单）">
     </div>
+    <p class="hint" style="margin:16px 0 8px;font-weight:600;color:var(--ink)">本地持久缓存</p>
+    <p class="muted" id="cacheStatus">地点与路线结果会保存到本机；超出上限时按使用频率自动清理低频条目。</p>
+    <div class="field">
+      <label>缓存体积上限（MB，默认 500；范围 10–10240）</label>
+      <input id="cacheMaxMb" type="number" min="10" max="10240" step="10" placeholder="500">
+    </div>
+    <div class="action-row" style="margin-top:0">
+      <button id="cacheSave" class="ghost-btn" type="button">保存缓存上限</button>
+    </div>
     <div class="action-row">
       <button id="aiTest" class="ghost-btn">测试连通</button>
       <button id="aiSave" class="primary">保存</button>
@@ -277,18 +325,7 @@
   </div>
 </div>
 
-<script>
-  // Leaflet 加载失败时回退到 unpkg
-  window.addEventListener('error', function (e) {
-    if (e && e.target && e.target.tagName === 'SCRIPT' && !window.__leafletFallback) {
-      window.__leafletFallback = true;
-      var s = document.createElement('script');
-      s.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
-      document.head.appendChild(s);
-    }
-  }, true);
-</script>
-<script src="https://cdn.bootcdn.net/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="vendor/leaflet/leaflet.js"></script>
 <script src="travel-data.js"></script>
 <script src="travel-guides.js"></script>
 <script src="ai.js"></script>

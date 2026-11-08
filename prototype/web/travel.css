@@ -236,9 +236,10 @@ button.on.ghost-btn{background:var(--accent-soft);border-color:var(--accent);col
 
 .timeline{margin:14px 0 4px}
 .day-block{
-  background:var(--card);border:1px solid var(--line);border-radius:var(--r);
-  box-shadow:var(--shadow);margin-bottom:16px;overflow:hidden;
+  background:var(--card);border:1px solid var(--line);border-left:3px solid var(--day-c, var(--line));
+  border-radius:var(--r);box-shadow:var(--shadow);margin-bottom:16px;overflow:hidden;
 }
+.day-head .d-dot{width:9px;height:9px;border-radius:50%;display:inline-block;flex:none}
 .day-body{position:relative;padding:14px 16px 12px 34px}
 .day-body::before{
   content:"";position:absolute;left:14px;top:20px;bottom:16px;width:2px;
@@ -336,14 +337,18 @@ button.on.ghost-btn{background:var(--accent-soft);border-color:var(--accent);col
   background:rgba(255,255,255,.88);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
   border:1px solid var(--line);border-radius:12px;
   padding:9px 13px;font-size:11.5px;color:var(--ink);
-  display:grid;gap:5px;box-shadow:var(--shadow);
+  display:grid;grid-template-columns:repeat(2,auto);gap:5px 13px;box-shadow:var(--shadow);
+  max-width:270px;max-height:44vh;overflow:auto;
 }
 .legend .sw{display:inline-block;width:16px;height:3px;border-radius:2px;margin-right:6px;vertical-align:middle}
+.sw.day{width:10px;height:10px;border-radius:3px}
 .sw.walk{background:var(--walk);border-bottom:2px dashed var(--walk);height:1px}
 .sw.bike{background:var(--bike);border-bottom:2px dashed var(--bike);height:1px}
 .sw.transit{background:var(--transit)}
-.sw.taxi{background:var(--taxi)}
+.sw.taxi{background:var(--taxi);border-bottom:2px dashed var(--taxi);height:1px}
 .sw.hub{width:10px;height:10px;border-radius:3px;background:#9aa098}
+.lg-title{grid-column:1/-1;font-size:10px;color:var(--muted);letter-spacing:.4px}
+.lg-sep{grid-column:1/-1;height:1px;background:var(--line-soft);margin:2px 0}
 .map-hint{
   position:absolute;left:58px;top:12px;z-index:600;max-width:250px;
   background:rgba(255,255,255,.88);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
@@ -384,6 +389,113 @@ button.on.ghost-btn{background:var(--accent-soft);border-color:var(--accent);col
 .nl-row input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(74,124,111,.12)}
 .nl-row .ghost-btn{flex:none}
 
+/* ---------- 步骤1：目的地酒店搜索 ---------- */
+.hotel-row{display:flex;gap:8px}
+.hotel-row input{flex:1;padding:9px 12px;border:1px solid var(--line);border-radius:10px;background:#fdfdfb;font-size:13.5px}
+.hotel-row input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(74,124,111,.12)}
+.hotel-row .ghost-btn{flex:none}
+.hotel-results{
+  margin-top:8px;border:1px solid var(--line);border-radius:10px;background:#fff;
+  max-height:240px;overflow-y:auto;
+}
+.hotel-item{
+  display:flex;flex-direction:column;gap:2px;width:100%;text-align:left;
+  padding:9px 12px;border:0;border-bottom:1px solid var(--line);
+  background:transparent;cursor:pointer;font:inherit;color:inherit;
+}
+.hotel-item:last-child{border-bottom:0}
+.hotel-item:hover{background:var(--accent-soft)}
+.hotel-item .h-name{font-size:13px;font-weight:600}
+.hotel-item .h-addr{font-size:11.5px;color:var(--muted);line-height:1.5}
+.hotel-item .h-badge{font-size:10.5px;color:var(--accent-deep)}
+.hotel-picked{
+  display:flex;align-items:center;gap:8px;margin-top:8px;padding:8px 10px;
+  border:1px solid var(--accent);border-radius:10px;background:var(--accent-soft);
+  font-size:12.5px;line-height:1.5;
+}
+.hotel-picked b{font-weight:600}
+.hotel-picked .hotel-clear{
+  margin-left:auto;border:0;background:transparent;color:var(--accent-deep);
+  cursor:pointer;font:inherit;font-size:12px;white-space:nowrap;
+}
+.hotel-retry{
+  border:1px solid var(--accent);border-radius:999px;background:var(--accent-soft);
+  color:var(--accent-deep);cursor:pointer;font:inherit;font-size:11.5px;
+  padding:2px 10px;white-space:nowrap;
+}
+.hotel-retry:hover{background:#e3ede8}
+.hotel-item:disabled{opacity:.6;cursor:progress}
+
+/* ---------- 通用 POI 搜索（出发点 / 酒店共用视觉） ---------- */
+.poi-row{display:flex;gap:8px}
+.poi-row input{flex:1;padding:9px 12px;border:1px solid var(--line);border-radius:10px;background:#fdfdfb;font-size:13.5px}
+.poi-row input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(74,124,111,.12)}
+.poi-row .ghost-btn{flex:none}
+.poi-results{
+  margin-top:8px;border:1px solid var(--line);border-radius:10px;background:#fff;
+  max-height:240px;overflow-y:auto;
+}
+.poi-item{
+  display:flex;flex-direction:column;gap:2px;width:100%;text-align:left;
+  padding:9px 12px;border:0;border-bottom:1px solid var(--line);
+  background:transparent;cursor:pointer;font:inherit;color:inherit;
+}
+.poi-item:last-child{border-bottom:0}
+.poi-item:hover{background:var(--accent-soft)}
+.poi-item .p-name{font-size:13px;font-weight:600}
+.poi-item .p-addr{font-size:11.5px;color:var(--muted);line-height:1.5}
+.poi-item:disabled{opacity:.6;cursor:progress}
+.poi-quick{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.poi-quick button{
+  border:1px solid var(--line);background:var(--card);border-radius:999px;
+  padding:4px 11px;font-size:11.5px;color:var(--ink);transition:.2s;
+}
+.poi-quick button:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.poi-quick button.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+.poi-picked{
+  display:flex;align-items:center;gap:8px;margin-top:8px;padding:8px 10px;
+  border:1px solid var(--accent);border-radius:10px;background:var(--accent-soft);
+  font-size:12.5px;line-height:1.5;
+}
+.poi-picked b{font-weight:600}
+.poi-picked .p-badge{font-size:10.5px;color:var(--accent-deep)}
+.poi-picked .poi-clear{
+  margin-left:auto;border:0;background:transparent;color:var(--accent-deep);
+  cursor:pointer;font:inherit;font-size:12px;white-space:nowrap;
+}
+.poi-empty{padding:10px 12px;font-size:12px;color:var(--muted);line-height:1.6}
+.poi-empty button{
+  border:1px solid var(--accent);border-radius:999px;background:var(--accent-soft);
+  color:var(--accent-deep);cursor:pointer;font:inherit;font-size:11.5px;
+  padding:2px 10px;white-space:nowrap;
+}
+
+/* ---------- 详细路线加载提示 ---------- */
+.route-loading{
+  position:absolute;right:12px;bottom:12px;z-index:650;
+  display:flex;align-items:center;gap:8px;max-width:calc(100% - 24px);
+  background:rgba(255,255,255,.92);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  border:1px solid var(--line);border-radius:999px;
+  padding:7px 13px;font-size:11.5px;color:var(--ink);box-shadow:var(--shadow);
+}
+.route-loading b{font-variant-numeric:tabular-nums;margin-left:2px}
+.rl-spin{
+  width:12px;height:12px;border-radius:50%;flex:none;
+  border:2px solid var(--accent-soft);border-top-color:var(--accent);
+  animation:rl-spin .8s linear infinite;
+}
+@keyframes rl-spin{to{transform:rotate(360deg)}}
+
+/* ---------- 时间轴：公交换乘组成 ---------- */
+.tleg-detail{
+  display:flex;gap:4px;flex-wrap:wrap;align-items:center;
+  margin-top:5px;font-size:11px;color:var(--muted);line-height:1.6;
+}
+.tleg-detail .seg{padding:1px 7px;border-radius:999px;background:var(--line-soft);white-space:nowrap}
+.tleg-detail .seg.walk{background:#eaf3e8;color:#3d7a38}
+.tleg-detail .seg.transit{background:#e8eef6;color:#3f6b96}
+.tleg-detail .seg-arrow{opacity:.5}
+
 /* ---------- 步骤2：接驳栏（出发点 → 车站） ---------- */
 .access-bar{
   border:1px solid var(--line);border-radius:12px;background:#fbfcf9;
@@ -400,17 +512,55 @@ button.on.ghost-btn{background:var(--accent-soft);border-color:var(--accent);col
 .st-chip.on{background:var(--accent);color:#fff;border-color:transparent;font-weight:600}
 .ab-note{margin-top:8px;font-size:10.5px;color:var(--muted);line-height:1.6}
 
-/* ---------- 步骤4：接驳 + 城际高亮条 ---------- */
-.ic-strip{
-  margin:0;padding:8px 16px;font-size:12px;color:var(--ink);
-  border-bottom:1px solid var(--line-soft);background:#fbfcf9;
+/* ---------- 步骤2：两侧车站 / 机场搜索 ---------- */
+.station-panel{
+  display:grid;grid-template-columns:1fr 1fr;gap:14px;
+  margin:12px 0 2px;padding:13px;
+  border:1px solid var(--line-soft);border-radius:12px;background:#fbfcf9;
 }
-.ic-strip i{font-style:normal;color:var(--muted)}
-.ic-strip.main{
-  background:linear-gradient(90deg,#f4ecdd,#f8f3e9 65%);
-  color:#8a6f4d;font-weight:600;
-  border-bottom:1px solid var(--line);
+.station-block{min-width:0}
+.station-title{font-size:12.5px;font-weight:600;color:var(--ink);margin-bottom:8px}
+.station-panel .poi-row{margin-bottom:0}
+.station-panel .poi-results{max-height:210px}
+.station-panel .poi-quick{margin-top:8px}
+.station-panel .poi-quick button{max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.station-hint{grid-column:1/-1;margin:0;font-size:10.5px}
+.poi-item .p-badge{font-size:10px;color:var(--accent-deep);margin-top:1px}
+
+/* ---------- 步骤4：城际衔接（出发点 → 枢纽 → 酒店） ---------- */
+.ic-plan{
+  margin:0 0 12px;border:1px solid var(--line);border-radius:14px;
+  background:linear-gradient(180deg,#fcfbf7,#f7f6f0);overflow:hidden;
 }
+.ic-plan-head{
+  display:flex;align-items:baseline;justify-content:space-between;gap:8px;
+  padding:10px 13px;border-bottom:1px solid var(--line-soft);
+}
+.ic-plan-title{font-size:13px;font-weight:700;color:var(--ink)}
+.ic-plan-sub{font-size:10.5px;color:var(--muted);text-align:right}
+.ic-block{padding:8px 10px 9px}
+.ic-block + .ic-block{border-top:1px dashed var(--line)}
+.ic-block-title{
+  display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;
+  padding:2px 3px 5px;font-size:11px;color:var(--muted);
+}
+.ic-block-title b{color:var(--ink);font-size:12px}
+.ic-time{font-size:10.5px;color:var(--accent-deep)}
+.ic-leg{display:flex;align-items:flex-start;gap:9px;padding:8px 4px}
+.ic-leg + .ic-leg{border-top:1px solid var(--line-soft)}
+.ic-leg.main{
+  background:#fbf5e9;border-radius:9px;padding:9px 8px;margin:2px 0;
+  border-top:0;
+}
+.ic-ico{font-size:16px;line-height:1.35;flex:none}
+.ic-body{flex:1;min-width:0}
+.ic-line{display:flex;align-items:baseline;gap:6px;flex-wrap:wrap;font-size:13px}
+.ic-line b{font-weight:600;overflow-wrap:anywhere}
+.ic-arrow{color:var(--muted)}
+.ic-meta{font-size:10.8px;line-height:1.6;color:var(--muted);margin-top:2px}
+.ic-meta i{font-style:normal}
+.ic-leg .mini{flex:none;margin-top:1px}
+.ic-foot{padding:0 13px 9px;font-size:10px;line-height:1.5;color:var(--muted)}
 .totals .est{font-style:normal;font-size:10.5px;opacity:.65;margin-left:4px}
 
 /* ---------- 步骤3：目的地情报面板 ---------- */
@@ -469,4 +619,99 @@ button.on.ghost-btn{background:var(--accent-soft);border-color:var(--accent);col
   .stepper li{white-space:nowrap}
   .badges{justify-content:flex-start}
   .topbar{padding-top:22px}
+}
+
+/* ---------- 手机竖屏：步骤 1 单列、加大触控区 ---------- */
+@media (max-width:640px){
+  .topbar{padding:18px 14px 12px;gap:10px;flex-wrap:wrap}
+  .brand{gap:10px}
+  .logo{width:38px;height:38px;font-size:17px;border-radius:12px}
+  h1{font-size:19px;letter-spacing:.6px}
+  .sub{font-size:11.5px}
+  .badges{gap:6px}
+  .stepper{padding:0 14px 10px;gap:6px}
+  .stepper li{padding:5px 11px;font-size:12px;gap:6px}
+  .layout{padding:8px 12px 32px}
+  .card{padding:16px 15px;border-radius:14px}
+  .field{margin-bottom:13px}
+  .field label{font-size:12px;letter-spacing:.4px}
+  .field-row{grid-template-columns:1fr;gap:0}
+  select,input[type=date],input[type=time],input[type=number]{font-size:16px;min-height:44px;padding:10px 12px}
+  .poi-row,.hotel-row{flex-direction:column}
+  .poi-row input,.hotel-row input{font-size:16px;min-height:44px;padding:10px 12px}
+  .poi-row .ghost-btn,.hotel-row .ghost-btn{width:100%;min-height:40px}
+  .nl-row{flex-direction:column}
+  .nl-row input{font-size:16px;min-height:44px}
+  .nl-row .ghost-btn{width:100%;min-height:40px}
+  .quick-cities{gap:6px}
+  .quick-cities button{padding:7px 14px;font-size:13px}
+  .poi-quick button{padding:6px 12px;font-size:12px}
+  .action-row{flex-wrap:wrap}
+  .action-row .ghost-btn{flex:1 1 auto}
+  .action-row .primary{flex:1 1 100%}
+  .mapcard{height:42vh;min-height:300px}
+  body[data-step="1"] .mapcard{height:26vh;min-height:190px}
+  body[data-step="2"] .mapcard{height:34vh;min-height:240px}
+  body[data-step="3"] .mapcard{height:38vh;min-height:270px}
+  .map-toolbar{gap:5px;top:10px;right:10px}
+  .map-toolbar .ghost-btn{font-size:11.5px;padding:5px 9px}
+  .map-hint{top:48px}
+  .route-loading{right:8px;bottom:8px;padding:6px 10px;font-size:11px}
+  .legend{left:8px;right:8px;bottom:8px;max-width:none;max-height:30vh;padding:7px 10px;font-size:10.5px;gap:4px 9px;grid-template-columns:repeat(3,auto)}
+  .chip{padding:5px 11px;font-size:12px}
+  .totals{gap:6px}
+  .modal{padding:10px;align-items:flex-end}
+  .modal-card{padding:16px;border-radius:16px 16px 12px 12px;max-height:88vh;overflow:auto;width:100%}
+  .toast{left:12px;right:12px;bottom:14px;transform:none;max-width:none}
+
+  /* 步骤 2：城际方式 / 车站机场 */
+  .tcard{grid-template-columns:42px 1fr auto;gap:10px;padding:11px 12px}
+  .tcard .ico{width:42px;height:42px;font-size:21px;border-radius:12px}
+  .tcard .name{font-size:13.5px}
+  .tcard .note{font-size:11px;line-height:1.55}
+  .tcard .time{font-size:15px}
+  .tb{right:10px;font-size:10px}
+  .access-bar{padding:11px 12px}
+  .ab-line{font-size:12.5px;line-height:1.9}
+  .ab-opt{display:block;margin-left:0;font-size:12px}
+  .ab-stations{line-height:2;gap:5px}
+  .station-panel{grid-template-columns:1fr;gap:14px;padding:12px}
+  .station-block .poi-row{flex-direction:column}
+  .station-block .poi-row input{font-size:16px;min-height:44px;padding:10px 12px}
+  .station-block .poi-row .ghost-btn{width:100%;min-height:40px}
+  .station-panel .poi-results{max-height:200px}
+  .station-panel .poi-quick button{min-height:34px}
+
+  /* 步骤 3：景点 / 攻略 */
+  .pool-head{flex-wrap:wrap}
+  .pool-head>span:last-child{display:flex;gap:6px;flex-wrap:wrap}
+  .spot-grid{grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:7px}
+  .guide{padding:11px}
+  .g-list{max-height:42vh}
+  .g-ask{flex-direction:column}
+  .g-ask .ghost-btn{width:100%;min-height:40px}
+  .guide input{font-size:16px;min-height:42px}
+  .g-tabs{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px}
+  .g-tabs button{flex:none;white-space:nowrap}
+
+  /* 步骤 4：方案 / 时间轴 */
+  .scheme-tabs{flex-wrap:nowrap;overflow-x:auto;padding-bottom:6px;-webkit-overflow-scrolling:touch}
+  .scheme-tabs button{flex:none;white-space:nowrap}
+  .preset-row{gap:6px}
+  .preset-row .ghost-btn.sm{flex:1 1 auto;justify-content:center}
+  .day-head{padding:9px 12px;gap:7px}
+  .day-head .d-sub{flex-basis:100%;font-size:11px}
+  .day-body{padding:12px 12px 10px 26px}
+  .day-body::before{left:11px}
+  .tleg .modes{gap:5px}
+  .tleg .lbl{font-size:10px}
+  .ic-plan-head{padding:9px 11px;flex-wrap:wrap}
+  .ic-block{padding:7px 8px 8px}
+  .ic-line{font-size:12.5px}
+  .ic-meta{font-size:10.2px}
+  .ic-foot{padding:0 11px 8px}
+
+  /* 步骤 5：地图工具条不挡住底部图例 */
+  body[data-step="4"] .mapcard,body[data-step="5"] .mapcard{height:40vh;min-height:280px}
+  .route-loading{left:8px;right:auto;max-width:calc(100% - 16px)}
 }

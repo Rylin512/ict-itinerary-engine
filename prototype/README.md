@@ -17,7 +17,7 @@ python serve.py --host 0.0.0.0      # 手机同一 WiFi：http://<你的IP>:8765
 
 **2026-10 新增：站点级接驳 + 打车估价 + 目的地攻略 + AI 通道。** 交通卡片落位到**具体机场/高铁站**（`STATIONS` 表，多站可切换，如成都天府 vs 双流），步骤①可选"从哪出发去车站"（热门城市预设地标含深圳机场东等，或自定义）；接驳段给出打车/公交两种估算并计入全程合计；打车费用 = 分城出租车计价表（`TAXI_TARIFF`）+ 百度路网里程（服务器端 AK，经 `serve.py /api/baidu/driving` 代理；未配 AK 回退 OSRM；滴滴/哈罗无公开 API，预留适配位）；步骤③新增「目的地情报」面板（美食/住宿/避坑/灵感，演示数据标注来源，支持检索与 AI 问答，未收录城市可 AI 生成）；AI 能力经 `ai.js` 接 DeepSeek 官方（走本地 `/api/llm` 代理）/OpenRouter 免费模型（浏览器直连）/华为云 MaaS，含**离线演示通道**兜底答辩断网——LLM 只转述结构化行程 JSON，禁止编造。
 
-**2026-11 新增：百度地图开放平台接入（双 AK）。** ① 服务器端 AK：环境变量 `BAIDU_MAP_AK`（或设置面板粘贴），serve.py 新增 `/api/baidu-config` 探测与 `/api/baidu/driving` 代理（direction/v2 驾车规划，`coord_type=gcj02`），打车/接驳里程优先用百度路网；② 浏览器端 AK：设置面板粘贴后底图从 OSM 切为百度地图 JS API GL（`web/baidu.js` 内置 GCJ-02→BD-09 闭合转换与 Leaflet/BMapGL 双后端地图抽象层）；③ 导航深链全部换百度 URI API（免 AK）。高德已全部移除。
+**2026-11 新增：百度地图开放平台接入（双 AK）。** ① 服务器端 AK：环境变量 `BAIDU_MAP_AK`（或设置面板粘贴），serve.py 新增 `/api/baidu-config` 探测、`/api/baidu/place` 地点检索与 `/api/baidu/route` 多模式路线代理（driving/walking/riding/transit，`coord_type=gcj02`），打车/接驳里程优先用百度路网；② **景点真实出入口**：用 place/v2 的 `detail_info.navi_location` 替换 POI 近似坐标；③ **目的地酒店搜索**：步骤①输入半截关键词（如「春熙路 全季」）→ 百度地点输入提示（suggestion）返回模糊候选 → 选中后再查地点详情取 `navi_location`，全程以酒店实际出入口为起终点（地点/详情请求走服务端优先闸门，不会被批量路线请求堵住）；④ **完整线路图**：逐段拉取所选通勤方式的真实道路折线并聚合绘制，不再画点到点直线；⑤ 浏览器端 AK：设置面板粘贴后底图从 OSM 切为百度地图 JS API GL（`web/baidu.js` 内置 GCJ-02→BD-09 闭合转换与 Leaflet/BMapGL 双后端地图抽象层），Leaflet 已本地化（`web/vendor/leaflet/`），OSM 瓦片不可达时自动切高德；⑥ 导航深链全部换百度 URI API（免 AK）。高德已全部移除。⑦ 城际车站 / 机场双向搜索：出发城与目的城都能模糊检索并手选上车/下车点，火车站优先使用 **12306 免费车站库**（本机缓存 7 天，不占百度配额），机场用内置 40 城数据、缺失时才请求百度；⑧ 百度结果持久缓存：地点检索 / 模糊提示 / 详情 / 各模式路线全部写入本机 SQLite（`prototype/.cache/baidu.sqlite3`，旧 `baidu.json` 首次启动自动迁移），不按时间过期，同一关键词 / 同一路段只请求一次；默认上限 **500MB**，只有超出上限时才按「命中次数低 → 最久未使用」自动淘汰，可在设置面板或 `POST /api/cache/config`（`{"maxMb": 500}`）调整；⑨ 公交折线修复：百度公交换乘组内会有多条备选线路，之前把备选折线一起拼接导致折返/直线，现在每组只取推荐线路，并对稀疏站点段、缺失 path 段和段间缺口用驾车路网补全（旧缓存已通过版本号失效）；⑩ 地图按「天」着色、线型区分交通方式，并补充步骤②~⑤与弹窗的移动端触控优化；⑪ 步骤④新增「城际衔接」卡：按顺序展示出发点 → 上车站/机场 → 所选航班/火车 → 下车站/机场 → 酒店，包含接驳方式、时长费用、预计抵达酒店时刻和逐段百度导航（有返程时刻时同时展示返程链路），并把这些接驳计入首日时间窗与全程合计；⑫ **免费开放数据兜底**：地点/酒店/车站模糊搜索在百度不可用或结果为空时自动落到 OpenStreetMap Nominatim，未深度收录城市的景点用 Overpass 查询周边 tourism/historic 要素（`/api/free/places`、`/api/free/attractions`）；WGS-84 坐标在服务端统一转 GCJ-02，上游加 1 次/秒礼貌闸门，地点缓存 30 天、景点缓存 7 天，浏览器端也可一键重试。免费数据不消耗百度配额，来源标注在页面与页脚（ODbL 许可）。
 
 引擎的四个答辩点（网页演示已并入跨城页与录屏，命令行可复跑）：
 
@@ -32,14 +32,26 @@ serve.py 接口（只承载代理层）：
 |---|---|---|
 | GET | `/api/ai-config` | 探测本地 LLM 渠道（环境变量里有哪个 key） |
 | POST | `/api/llm` | OpenAI 兼容 LLM 代理（DeepSeek 官方不允许浏览器直连） |
-| GET | `/api/baidu-config` | 探测百度服务器端 AK 是否已配置 |
-| POST | `/api/baidu/driving` | 百度路线规划代理（direction/v2，2 QPS 节流） |
+| GET | `/api/baidu-config` | 探测百度 AK（服务器端是否就绪 + 浏览器端 AK） |
+| POST | `/api/baidu/place` | 百度地点检索（酒店 / 景点，返回 `navi_location` 出入口坐标） |
+| POST | `/api/baidu/suggest` | 百度地点输入提示（模糊搜索，返回候选供用户选择） |
+| POST | `/api/baidu/detail` | 百度地点详情（按 uid 取 `navi_location` 出入口） |
+| POST | `/api/baidu/route` | 百度多模式路线（driving/walking/riding/transit，返回真实道路折线） |
+| POST | `/api/baidu/driving` | 兼容旧接口：驾车路线（同样返回折线） |
+| GET | `/api/rail-stations?city=成都&q=东` | 12306 免费车站库搜索（本机缓存 7 天，不占百度配额） |
+| GET | `/api/free/places?q=全季&city=成都&limit=8` | OpenStreetMap Nominatim 免费地点/酒店模糊搜索（缓存 30 天） |
+| GET | `/api/free/attractions?lat=30.66&lng=104.06&limit=30` | OpenStreetMap Overpass 周边景点发现（缓存 7 天） |
+| GET | `/api/cache/config` | 持久缓存统计（占用体积 / 条目数 / 分类）与当前上限 |
+| POST | `/api/cache/config` | 修改缓存上限 `{maxMb}`（10–10240 MB，默认 500），立即触发超限淘汰 |
+| GET | `/api/tiles/{z}/{x}/{y}.png` | 高德栅格瓦片代理（OSM 不可达时 Leaflet 底图兜底，内存缓存） |
+
+百度接口请求体：地点检索 `{query, region, pageSize}`；模糊搜索 `{query, region}`；详情 `{uid}`；路线 `{from:[lng,lat], to:[lng,lat], mode, city1?, city2?}`（GCJ-02，公交需城市名）。所有上游调用共用 `baidu_gate()` 全局 0.55s 闸门，保证不超过 2 次/秒；地点类请求带优先级，不会被行程的批量路线请求堵在后面。
 
 ### 命令行版
 
 ```bash
 python run_demo.py                                # 六个演示一次跑完
-python -m unittest discover -s tests -t . -v      # 5 条回归测试
+python -m unittest discover -s tests -t . -v      # 引擎 + serve.py 代理回归测试（84 条）
 ```
 
 ---
