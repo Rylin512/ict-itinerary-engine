@@ -40,6 +40,39 @@ const BAIDU = {
     } catch (e) { /* 忽略 */ }
   },
 
+  // —— 地点结果本地缓存：同一关键词 / uid 不再重复请求百度 ——
+  // 服务端 .cache/baidu.json 也会持久化；这里加一层浏览器缓存，刷新页面也免请求。
+  LS_CACHE: 'travel.baidu.results.v1.',
+  CACHE_TTL: 30 * 86400 * 1000,
+  _cacheGet(key) {
+    try {
+      const raw = localStorage.getItem(this.LS_CACHE + key);
+      if (!raw) return null;
+      const item = JSON.parse(raw);
+      if (!item || Date.now() - (item.t || 0) > this.CACHE_TTL) {
+        localStorage.removeItem(this.LS_CACHE + key);
+        return null;
+      }
+      return item.v;
+    } catch (e) { return null; }
+  },
+  _cacheSet(key, value) {
+    try {
+      localStorage.setItem(this.LS_CACHE + key, JSON.stringify({ t: Date.now(), v: value }));
+    } catch (e) {
+      // 配额满时清掉最早的一批地点缓存后重试一次
+      try {
+        const keys = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          if (k && k.startsWith(this.LS_CACHE)) keys.push(k);
+        }
+        keys.slice(0, Math.ceil(keys.length / 2)).forEach(k => localStorage.removeItem(k));
+        localStorage.setItem(this.LS_CACHE + key, JSON.stringify({ t: Date.now(), v: value }));
+      } catch (e2) { /* 忽略 */ }
+    }
+  },
+
   async probe() {
     if (!location.protocol.startsWith('http')) { this.ready = false; return this.ready; }
     try {
@@ -144,25 +177,53 @@ const BAIDU = {
     }
   },
 
-  // 精确 POI 检索：带 detail_info.navi_location（景点/酒店真实出入口）
+  // 精确 POI 检索：带 detail_info.navi_location（景点/酒店真实出入口）。
+  // 百度不可用 / 额度用完 / 结果为空时，自动落到 OpenStreetMap 免费地点库。
   async searchPlaces(query, region, pageSize = 10) {
-    if (!this.available()) return [];
-    const data = await this._postJson('/api/baidu/place', { query, region, pageSize });
-    return (data && data.places) || [];
+    const key = `place|${region || ''}|${query}|${pageSize}`;
+    const cached = this._cacheGet(key);
+    if (cached) return cached;
+    let places = [];
+    if (this.available()) {
+      const data = await this._postJson('/api/baidu/place', { query, region, pageSize });
+      places = (data && data.places) || [];
+    }
+    if (!places.length) {
+      places = await FREE.places(query, region, pageSize);
+      if (places.length) this.lastError = '';
+    }
+    if (places.length) this._cacheSet(key, places);
+    return places;
   },
 
   // 模糊搜索：用户只记得半截关键词时也能列出候选（无出入口坐标，选中后补详情）
   async suggestPlaces(query, region) {
-    if (!this.available()) return [];
-    const data = await this._postJson('/api/baidu/suggest', { query, region });
-    return (data && data.places) || [];
+    const key = `suggest|${region || ''}|${query}`;
+    const cached = this._cacheGet(key);
+    if (cached) return cached;
+    let places = [];
+    if (this.available()) {
+      const data = await this._postJson('/api/baidu/suggest', { query, region });
+      places = (data && data.places) || [];
+    }
+    if (!places.length) {
+      places = await FREE.places(query, region, 8);
+      if (places.length) this.lastError = '';
+    }
+    if (places.length) this._cacheSet(key, places);
+    return places;
   },
 
   // 用候选的 uid 取详情：拿到 navi_location 后再按酒店实际出入口算路线
   async placeDetail(uid) {
     if (!this.available() || !uid) return null;
+    const key = `detail|${uid}`;
+    const cached = this._cacheGet(key);
+    if (cached) return cached;
     const data = await this._postJson('/api/baidu/detail', { uid });
-    return (data && data.place) || null;
+    const place = (data && data.place) || null;
+    if (place) this._cacheSet(key, place);
+    return place;
   },
 
   // —— 驾车路网（km / 分钟）：兼容旧调用，等同 routeMode(..., 'driving') ——
@@ -200,6 +261,7 @@ const BAIDU = {
       return {
         km: data.km, min: data.min, roadMin: data.min,
         path: data.path || [], cost: data.cost, mode: data.mode || mode,
+        segments: data.segments || [],  // 公交：步行/地铁/公交的换乘组成
       };
     } catch (e) {
       this.lastError = (e && e.name === 'AbortError') ? '路线请求超时' : '网络异常，路线请求失败';
@@ -240,3 +302,50 @@ const BAIDU = {
 };
 
 BAIDU.load();
+
+/* 免费地点数据（OpenStreetMap / Nominatim / Overpass）
+ * 服务端已做 1 次/秒限流和持久缓存；这里只负责请求与错误处理。
+ * 不消耗百度配额，作为百度地点/景点搜索不可用或结果为空时的兜底。 */
+const FREE = {
+  lastError: '',
+
+  async _get(path, params, timeoutMs = 35000) {
+    this.lastError = '';
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const qs = new URLSearchParams(params).toString();
+      const r = await fetch(`${path}?${qs}`, { signal: ctrl.signal, cache: 'no-store' });
+      const data = r.ok ? await r.json() : null;
+      if (!data || !data.ok) {
+        this.lastError = (data && data.error) || `免费数据服务返回 ${r.status}`;
+        return null;
+      }
+      return data;
+    } catch (e) {
+      this.lastError = e && e.name === 'AbortError'
+        ? '免费数据源请求超时'
+        : '免费数据源网络异常';
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+
+  // Nominatim 免费地理编码：q + 城市，返回统一地点结构（GCJ-02）
+  async places(query, city, limit = 8) {
+    const data = await this._get('/api/free/places', {
+      q: query, city: city || '', limit,
+    });
+    return (data && data.places) || [];
+  },
+
+  // Overpass 免费景点发现：未收录城市用城市中心坐标查周边景点
+  async attractions(city, center, limit = 30) {
+    if (!center || center.lat == null || center.lng == null) return [];
+    const data = await this._get('/api/free/attractions', {
+      city: city || '', lat: center.lat, lng: center.lng, limit,
+    }, 40000);
+    return (data && data.places) || [];
+  },
+};
