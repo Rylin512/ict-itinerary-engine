@@ -70,6 +70,23 @@ class TestParseResponse(unittest.TestCase):
             serve.parse_baidu_driving({"status": 0})
 
 
+class TestBaiduConfig(unittest.TestCase):
+    def test_browser_ak_exposed_only_when_configured(self):
+        with mock.patch.dict(os.environ, {"BAIDU_BROWSER_AK": "b-ak"}, clear=True):
+            cfg = serve.baidu_config()
+            self.assertEqual(cfg["browserAK"], "b-ak")
+            self.assertFalse(cfg["ready"])
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(serve.baidu_config()["browserAK"], "")
+
+    def test_config_reports_ready_and_interval(self):
+        with mock.patch.dict(os.environ, {"BAIDU_MAP_AK": "s-ak"}, clear=True):
+            cfg = serve.baidu_config()
+        self.assertTrue(cfg["ready"])
+        self.assertEqual(cfg["browserAK"], "")
+        self.assertGreaterEqual(cfg["minInterval"], 500)
+
+
 class TestHandler(unittest.TestCase):
     def test_missing_ak_returns_ok_false(self):
         with mock.patch.dict(os.environ, {}, clear=True):

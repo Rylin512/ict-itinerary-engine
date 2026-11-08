@@ -868,6 +868,7 @@ const spotMarkers = {};         // 景点 id -> 圆点句柄（双后端通用�
 
 const MAPAPI = {
   async pickBackend() {
+    await BAIDU.probe();  // 先取本地配置：环境变量里的浏览器端 AK 在这里生效
     if (BAIDU.browserKey && location.protocol.startsWith('http')) {
       if (await BAIDU.loadGL()) return 'baidu';
     }
