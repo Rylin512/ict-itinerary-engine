@@ -69,10 +69,11 @@ const BAIDU = {
   },
 
   // —— 驾车路网（km / 分钟）：本地代理 → 百度 Web 服务；不可用返回 null ——
+  // 代理层有 2 QPS 全局节流闸，并发请求会在服务端排队，所以这里的超时要留够排队时间。
   async route(a, b) {
     if ((!this.ready && !this.key) || !location.protocol.startsWith('http')) return null;
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 4000);
+    const timer = setTimeout(() => ctrl.abort(), 15000);
     try {
       const headers = { 'Content-Type': 'application/json' };
       if (this.key) headers['X-Baidu-Ak'] = this.key;
