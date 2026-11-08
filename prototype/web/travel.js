@@ -864,6 +864,7 @@ const NAV_MODE = { walk: 'walking', bike: 'riding', transit: 'transit', taxi: 'd
  * 上层代码（showIntercity / showSpots / drawRoute …）只调 MAPAPI，不感知后端。
  */
 let MAP_BACKEND = 'leaflet';    // 后端原生对象 map 在 _init* 里赋值
+const spotMarkers = {};         // 景点 id -> 圆点句柄（双后端通用的改色句柄）
 
 const MAPAPI = {
   async pickBackend() {

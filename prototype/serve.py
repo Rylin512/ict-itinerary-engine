@@ -272,13 +272,14 @@ def _coord(v):
 
 
 def build_baidu_driving_url(ak, from_pair, to_pair):
-    """from/to 为 [lng, lat]（GCJ-02，页面数据坐标系）。纯函数便于单测。"""
+    """from/to 为 [lng, lat]（GCJ-02，页面数据坐标系，与高德/OSRM 一致）。
+    百度 direction API 要求 origin/destination 为「纬度,经度」，这里做一次换序。纯函数便于单测。"""
     if not ak:
         raise ValueError("未找到百度 AK：请在设置面板填写，或为 serve.py 设置环境变量 BAIDU_MAP_AK")
     if len(from_pair) != 2 or len(to_pair) != 2:
         raise ValueError("from / to 需为 [经度, 纬度] 二元组")
-    o = ",".join(_coord(x) for x in from_pair)
-    d = ",".join(_coord(x) for x in to_pair)
+    o = f"{_coord(from_pair[1])},{_coord(from_pair[0])}"  # 百度要 lat,lng
+    d = f"{_coord(to_pair[1])},{_coord(to_pair[0])}"
     return (f"{BAIDU_DRIVING_URL}?origin={o}&destination={d}"
             f"&coord_type=gcj02&ret_coordtype=bd09ll&ak={ak}")
 
