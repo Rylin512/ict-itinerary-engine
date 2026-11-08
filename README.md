@@ -96,7 +96,7 @@ python serve.py
 python serve.py --host 0.0.0.0
 ```
 
-可选增强：设置环境变量 `BAIDU_MAP_AK`（服务器端 AK）后打车/接驳里程来自百度真实路网；页面右上角 ✨ 设置里可粘贴 AI key 与百度浏览器端 AK（切换原生百度底图）。
+可选增强：设置环境变量 `BAIDU_MAP_AK`（服务器端 AK）后打车/接驳里程来自百度真实路网；设置 `BAIDU_BROWSER_AK`（浏览器端 AK）后底图自动切换为百度地图 JS API GL，无需在页面里粘贴。两个 AK 均受 **2 次/秒**上限约束：服务端 `baidu_gate()` 做全局节流，前端 `BAIDU.enqueue()` 串行排队，突发请求会排队执行而不是直接报错。
 
 ### 命令行演示
 

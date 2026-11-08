@@ -170,6 +170,24 @@ def baidu_ready():
     return bool(os.environ.get("BAIDU_MAP_AK"))
 
 
+def baidu_browser_ak():
+    """浏览器端 AK（JS API GL）只从环境变量读取。
+
+    浏览器端 AK 按设计就是下发给页面的凭据，靠 Referer 白名单保护；
+    这里只在显式配置时下发，没配就返回空串，页面自动回退 OSM 底图。
+    """
+    return os.environ.get("BAIDU_BROWSER_AK", "")
+
+
+def baidu_config():
+    return {
+        "ready": baidu_ready(),
+        "host": "api.map.baidu.com",
+        "browserAK": baidu_browser_ak(),
+        "minInterval": int(BAIDU_MIN_INTERVAL * 1000),
+    }
+
+
 def _coord(v):
     """校验单个坐标值并格式化为百度要求的 6 位小数。"""
     try:
@@ -262,7 +280,7 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/api/ai-config":
             return self._send(ai_config())
         if path == "/api/baidu-config":
-            return self._send({"ready": baidu_ready(), "host": "api.map.baidu.com"})
+            return self._send(baidu_config())
         return super().do_GET()
 
     def do_POST(self):

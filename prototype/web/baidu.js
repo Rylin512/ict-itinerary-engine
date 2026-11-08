@@ -20,6 +20,7 @@ const BAIDU = {
   key: '',       // 面板粘贴的服务器端 AK（可选，优先于环境变量）
   // —— 浏览器端 AK ——
   browserKey: '',
+  browserFromEnv: false,   // true 表示来自本地 serve.py 的环境变量，不写回 localStorage
   glReady: false,
 
   LS_SERVER: 'travel.baidu.ak',
@@ -45,8 +46,36 @@ const BAIDU = {
       const r = await fetch('/api/baidu-config', { cache: 'no-store' });
       const cfg = r.ok ? await r.json() : null;
       this.ready = !!(cfg && cfg.ready);
+      // 本地环境变量里配了浏览器端 AK：页面自动使用，无需在设置面板粘贴
+      if (cfg && cfg.browserAK && !this.browserKey) {
+        this.browserKey = cfg.browserAK;
+        this.browserFromEnv = true;
+      }
+      if (cfg && cfg.minInterval) this.MIN_INTERVAL = cfg.minInterval;
     } catch (e) { this.ready = false; }
     return this.ready;
+  },
+
+  // —— 上游调用统一排队 ——
+  // 两个 AK 都是 2 次/秒上限：服务端 baidu_gate() 做全局节流，
+  // 前端也串行化，避免一次渲染几十个路段把服务端线程堆满、并让请求提前超时。
+  MIN_INTERVAL: 550,
+  _queue: [],
+  _running: false,
+  enqueue(task) {
+    return new Promise((resolve, reject) => {
+      this._queue.push({ task, resolve, reject });
+      this._pump();
+    });
+  },
+  _pump() {
+    if (this._running) return;
+    const job = this._queue.shift();
+    if (!job) return;
+    this._running = true;
+    Promise.resolve().then(job.task).then(job.resolve, job.reject).finally(() => {
+      setTimeout(() => { this._running = false; this._pump(); }, this.MIN_INTERVAL);
+    });
   },
 
   serverStatus() {
@@ -55,6 +84,7 @@ const BAIDU = {
     return '未配置：路网里程回退 OSRM 估算';
   },
   browserStatus() {
+    if (this.browserFromEnv) return '浏览器端 AK 生效（本地环境变量）· 底图使用百度地图 JS API GL';
     return this.browserKey
       ? '浏览器端 AK 已配置 · 底图使用百度地图 JS API GL（保存后刷新生效）'
       : '未配置：底图使用 OpenStreetMap（免 key）';
@@ -69,9 +99,13 @@ const BAIDU = {
   },
 
   // —— 驾车路网（km / 分钟）：本地代理 → 百度 Web 服务；不可用返回 null ——
-  // 代理层有 2 QPS 全局节流闸，并发请求会在服务端排队，所以这里的超时要留够排队时间。
+  // 所有上游调用都进队列：两个 AK 都限 2 次/秒，服务端还有一道全局闸门。
   async route(a, b) {
     if ((!this.ready && !this.key) || !location.protocol.startsWith('http')) return null;
+    return this.enqueue(() => this._routeOnce(a, b));
+  },
+
+  async _routeOnce(a, b) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 15000);
     try {
