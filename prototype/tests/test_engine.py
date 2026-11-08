@@ -3,10 +3,13 @@
     python -m unittest discover -s tests -t . -v
 """
 
+import json
+import os
 import random
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -71,30 +74,26 @@ class TestEngine(unittest.TestCase):
         self.assertRegex(text, r"[A-Z]?\d?\s?口")
 
     def test_http_contract(self):
-        """前端只认 serve.py 的 JSON 契约，这里把它一起测了。"""
-        from serve import handle_plan, handle_replan, handle_toggle
+        """前端只认 serve.py 的 JSON 契约（现为 LLM / 百度代理），这里把它一起测了。"""
+        from serve import ai_config, baidu_ready, handle_baidu_driving, handle_llm
 
-        body = {
-            "ids": ["kuanzhai", "renmin", "wuhou", "jinli",
-                    "cdmuseum", "chunxi", "dufu", "jinsha"],
-            "days": 3, "party": "老人", "pace": "标准",
-            "budget": 1500, "start_weekday": 5,
-        }
-        plan = handle_plan(body)
-        self.assertEqual(plan["violations"], [])
-        self.assertEqual(len(plan["trip"]["dayplans"]), 3)
-        first = plan["trip"]["dayplans"][0]["items"][0]
-        self.assertEqual(first["kind"], "visit")
-        self.assertTrue(first["leg"]["steps"])
-        self.assertIn("arrive", first)
+        # LLM 代理：参数缺失/非法上游 → 归一化的 ok:false，绝不 500
+        self.assertFalse(handle_llm({}, {})["ok"])
+        bad = handle_llm({"baseURL": "https://evil.example.com", "model": "m",
+                          "messages": [{"role": "user", "content": "x"}]}, {})
+        self.assertFalse(bad["ok"])
+        self.assertIn("白名单", bad["error"])
 
-        toggled = handle_toggle(dict(body, pid="panda"))
-        self.assertIn("delta", toggled)
-        self.assertIn("travel", toggled["delta"])
+        # 百度代理：无 AK / 坐标非法 → 归一化的 ok:false
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(handle_baidu_driving({"from": [104.0, 30.0], "to": [104.1, 30.6]}, {})["ok"])
+        self.assertFalse(handle_baidu_driving({"from": "x"}, {"X-Baidu-Ak": "ak"})["ok"])
 
-        rained = handle_replan(dict(body, day=2, mode="rain"))
-        self.assertEqual(rained["violations"], [])
-        self.assertEqual(rained["day"], 2)
+        # 渠道探测：只报 ready 布尔，不回传 key 内容
+        with mock.patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-secret-xyz"}, clear=True):
+            cfg = ai_config()
+            self.assertFalse(baidu_ready())
+        self.assertNotIn("sk-secret-xyz", json.dumps(cfg, ensure_ascii=False))
 
 
 if __name__ == "__main__":
