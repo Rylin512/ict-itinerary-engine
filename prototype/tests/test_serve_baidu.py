@@ -33,10 +33,11 @@ class TestBaiduAk(unittest.TestCase):
 
 class TestBuildUrl(unittest.TestCase):
     def test_builds_url_with_gcj02(self):
+        # 入参 [lng, lat]（页面坐标系），百度要求 origin/destination 为 lat,lng，应换序
         url = serve.build_baidu_driving_url("ak-1", [104.067, 30.572], [104.141, 30.630])
         self.assertIn("https://api.map.baidu.com/direction/v2/driving?", url)
-        self.assertIn("origin=104.067000,30.572000", url)
-        self.assertIn("destination=104.141000,30.630000", url)
+        self.assertIn("origin=30.572000,104.067000", url)
+        self.assertIn("destination=30.630000,104.141000", url)
         self.assertIn("coord_type=gcj02", url)
         self.assertIn("ak=ak-1", url)
 
