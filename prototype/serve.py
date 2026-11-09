@@ -65,7 +65,7 @@ CACHE_MAX_MB_MAX = 10240
 CACHE_EVICT_RATIO = 0.9                     # 超限后回收到上限的 90%，避免每次写入都触发淘汰
 PLACE_TTL = None                            # None = 不按时间过期，交给体积淘汰
 ROUTE_TTL = None
-ROUTE_CACHE_VERSION = 2  # 旧版公交折线把备选线路拼在一起，升版后不再命中
+ROUTE_CACHE_VERSION = 3  # 3：坐标按 4 位小数归一化后再做键，旧键自然失效
 FREE_PLACE_TTL = 30 * 86400
 FREE_POI_TTL = 7 * 86400
 FREE_MIN_INTERVAL = 1.0  # Nominatim / Overpass 公共服务的礼貌间隔（≤1 次/秒）
@@ -230,6 +230,19 @@ def _cache_evict_if_needed(db=None):
 def cache_key(section, payload):
     raw = section + "|" + json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def point_key(pair, ndigits=6):
+    """缓存键里的坐标精度：6 位小数 ≈ 0.11 米，保证"米级以内算同一个点"。
+
+    之前用 4 位（≈11 米）是为了提高命中率，但会把相距十几米的两个上车点
+    当成同一条路线，精度不够。现在上游请求本来就用原始坐标，缓存键只决定
+    "两次请求是否算同一个点"，取 6 位既不丢精度，也让同样的输入稳定命中。
+    """
+    try:
+        return [round(float(pair[0]), ndigits), round(float(pair[1]), ndigits)]
+    except (TypeError, ValueError, IndexError):
+        return pair
 
 
 def cache_get(section, key, ttl=None):
@@ -876,8 +889,8 @@ def _baidu_request(url, timeout=15, priority=False):
 
 
 def handle_baidu_place(body, headers_in):
-    query = body.get("query") or ""
-    region = body.get("region") or body.get("city") or ""
+    query = (body.get("query") or "").strip()
+    region = (body.get("region") or body.get("city") or "").strip()
     page_size = body.get("pageSize") or 10
     page_num = body.get("pageNum") or 0
     key = cache_key("place", [query, region, page_size, page_num])
@@ -1100,7 +1113,7 @@ def handle_baidu_route(body, headers_in):
     from_pt = body.get("from") or []
     to_pt = body.get("to") or []
     key = cache_key("route", [
-        ROUTE_CACHE_VERSION, from_pt, to_pt, mode,
+        ROUTE_CACHE_VERSION, point_key(from_pt), point_key(to_pt), mode,
         body.get("city1") or "", body.get("city2") or "",
     ])
     force = bool(body.get("force"))
@@ -1352,10 +1365,21 @@ def _amap_request(url, timeout=15):
 
 def handle_amap_route(body, headers_in):
     mode = body.get("mode") or "driving"
+    from_pt = body.get("from") or []
+    to_pt = body.get("to") or []
+    # 与百度共用 routes 分区，但键带 amap 前缀，两家互不覆盖
+    key = cache_key("amap_route", [
+        ROUTE_CACHE_VERSION, point_key(from_pt), point_key(to_pt), mode,
+        body.get("city1") or "",
+    ])
+    if not body.get("force"):
+        hit = cache_get("routes", key, ROUTE_TTL)
+        if hit is not None:
+            return {"ok": True, **hit, "cached": True}
     try:
         url = build_amap_route_url(
             resolve_amap_key(headers_in.get("X-Amap-Key")),
-            body.get("from") or [], body.get("to") or [], mode, body.get("city1"),
+            from_pt, to_pt, mode, body.get("city1"),
         )
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
@@ -1366,14 +1390,22 @@ def handle_amap_route(body, headers_in):
         out = parse_amap_route(data, mode)
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
+    cache_set("routes", key, out)
     return {"ok": True, **out}
 
 
 def handle_amap_place(body, headers_in):
+    query = (body.get("query") or "").strip()
+    region = (body.get("region") or "").strip()
+    page_size = body.get("pageSize") or 10
+    key = cache_key("amap_place", [query, region, page_size])
+    hit = cache_get("places", key, PLACE_TTL)
+    if hit is not None:
+        return {"ok": True, "source": "amap", "places": hit, "cached": True}
     try:
         url = build_amap_place_url(
             resolve_amap_key(headers_in.get("X-Amap-Key")),
-            body.get("query") or "", body.get("region"), body.get("pageSize") or 10,
+            query, region, page_size,
         )
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
@@ -1381,9 +1413,12 @@ def handle_amap_place(body, headers_in):
     if err:
         return {"ok": False, "error": err}
     try:
-        return {"ok": True, "source": "amap", "places": parse_amap_place(data)}
+        places = parse_amap_place(data)
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
+    if places:  # 空结果不写缓存，避免一次失败把查询永久钉死
+        cache_set("places", key, places)
+    return {"ok": True, "source": "amap", "places": places}
 
 
 # ================= 双供应商路由（分摊配额 + 自动降级） =================
@@ -1435,24 +1470,53 @@ def _pick_providers(kind, requested, headers_in):
 
 
 def handle_map_route(body, headers_in):
+    """统一入口：先查"任意供应商"的结果缓存，再按候选顺序请求。
+
+    自动模式会在两家之间轮换，如果只按供应商缓存，同样的两点换个供应商就又会
+    打一次上游。这里再加一层不带供应商的键，谁先算出来谁的结果都能被复用。
+    """
+    mode = body.get("mode") or "driving"
+    key = cache_key("map_route", [
+        ROUTE_CACHE_VERSION, point_key(body.get("from") or []),
+        point_key(body.get("to") or []), mode,
+        body.get("city1") or "", body.get("city2") or "",
+    ])
+    if not body.get("force"):
+        hit = cache_get("routes", key, ROUTE_TTL)
+        if hit is not None:
+            return {"ok": True, **hit, "cached": True}
+
     errors = []
     for name in _pick_providers("route", body.get("provider"), headers_in):
         handler = handle_baidu_route if name == "baidu" else handle_amap_route
         out = handler(body, headers_in)
         if out.get("ok"):
             out["provider"] = name
+            payload = {k: v for k, v in out.items() if k not in ("cached",)}
+            cache_set("routes", key, payload)
             return out
         errors.append(f"{name}: {out.get('error', '失败')}")
     return {"ok": False, "error": "；".join(errors) or "没有可用的地图服务"}
 
 
 def handle_map_place(body, headers_in):
+    key = cache_key("map_place", [
+        (body.get("query") or "").strip(),
+        (body.get("region") or "").strip(),
+        body.get("pageSize") or 10,
+    ])
+    hit = cache_get("places", key, PLACE_TTL)
+    if hit is not None:
+        return {"ok": True, **hit, "cached": True}
+
     errors = []
     for name in _pick_providers("place", body.get("provider"), headers_in):
         handler = handle_baidu_place if name == "baidu" else handle_amap_place
         out = handler(body, headers_in)
         if out.get("ok") and out.get("places"):
             out["provider"] = name
+            payload = {k: v for k, v in out.items() if k not in ("cached",)}
+            cache_set("places", key, payload)
             return out
         errors.append(f"{name}: {out.get('error') or '无结果'}")
     return {"ok": False, "error": "；".join(errors) or "没有可用的地图服务", "places": []}
