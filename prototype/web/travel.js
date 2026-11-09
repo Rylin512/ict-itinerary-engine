@@ -1248,16 +1248,22 @@ function intercityPlanHTML() {
 function renderLegend() {
   const el = $('#legend');
   if (!el) return;
-  const days = state.days.map((d, i) =>
-    `<div><i class="sw day" style="background:${dayColor(i)}"></i>第 ${i + 1} 天</div>`).join('');
-  el.innerHTML = `<span class="lg-title">颜色 = 天</span>${days}`
-    + '<span class="lg-sep"></span>'
-    + '<span class="lg-title">线型 = 方式</span>'
-    + '<div><i class="sw walk"></i>步行</div>'
-    + '<div><i class="sw bike"></i>骑行</div>'
-    + '<div><i class="sw transit"></i>公交地铁</div>'
-    + '<div><i class="sw taxi"></i>打车</div>'
-    + '<div><i class="sw hub"></i>住宿</div>';
+  const order = getOrder();
+  const dayCount = Math.max(1, order.filter(a => a.length).length);
+  let days = '';
+  for (let i = 0; i < dayCount; i++) {
+    days += `<span class="lg-day"><i class="lg-dot" style="background:${dayColor(i)}"></i>第 ${i + 1} 天</span>`;
+  }
+  el.innerHTML =
+    `<span class="lg-group"><span class="lg-title">线的颜色 = 第几天</span>${days}</span>`
+    + '<span class="lg-group"><span class="lg-title">路段圆标 = 怎么走</span>'
+    + '<span class="lg-item"><i class="mode-badge mb-walk">步</i>步行</span>'
+    + '<span class="lg-item"><i class="mode-badge mb-bike">骑</i>骑行</span>'
+    + '<span class="lg-item"><i class="mode-badge mb-transit">交</i>公交 / 地铁</span>'
+    + '<span class="lg-item"><i class="mode-badge mb-taxi">打</i>打车</span></span>'
+    + '<span class="lg-group"><span class="lg-title">标记</span>'
+    + '<span class="lg-item"><i class="lg-pin">🏨</i>住宿 / 出发点</span>'
+    + '<span class="lg-item"><i class="lg-pin">1·2</i>第 1 天第 2 站</span></span>';
 }
 
 function renderTimeline() {
@@ -1489,10 +1495,12 @@ function toggleSpot(id) {
 
 let map = null, gInter, gSpots, gRoute;
 const MODE_STYLE = {
-  walk: { c: '#3d8b37', d: '2,7' },
-  bike: { c: '#c07b12', d: '7,7' },
-  transit: { c: '#2f6bb0', d: null },
-  taxi: { c: '#6d4fa1', d: '11,6' },
+  // 线宽 + 虚线段 + 路段中点圆标：三种线索叠加，避免只靠虚线区分
+  // （百度 GL / 高德 JS API 只认 solid/dashed，自定义虚线样式在它们上面会退化成同一种）
+  walk: { c: '#3d8b37', d: '2,7', w: 3, icon: '步', cls: 'mb-walk' },
+  bike: { c: '#c07b12', d: '7,7', w: 4, icon: '骑', cls: 'mb-bike' },
+  transit: { c: '#2f6bb0', d: null, w: 5, icon: '交', cls: 'mb-transit' },
+  taxi: { c: '#6d4fa1', d: '11,6', w: 4, icon: '打', cls: 'mb-taxi' },
 };
 
 // 一天一个颜色：多天路线叠在同一张地图上时用颜色区分，线型仍表示交通方式
@@ -1929,6 +1937,7 @@ function drawRoute(fit, skipFetch) {
   const allPts = [hub];
   const pins = [{ pt: hub, html: '<div class="pin hub">🏨</div>', popup: `<b>${esc(hub.name)}</b><br>${hub.hotel ? (hub.hasNav ? '已选酒店（按酒店出入口坐标）' : '已选酒店（百度地点坐标）') : '住宿 / 出发点（全程同一酒店）'}` }];
   const legs = [];
+  const badges = [];
   let legIdx = 0;
   order.forEach((dayIds, di) => {
     if (!dayIds.length) return; // 空天（自由活动）不画线不占段
@@ -1956,15 +1965,20 @@ function drawRoute(fit, skipFetch) {
         + (real ? compositionHTML(geo, 'tleg-detail') : '')
         + `<br><a class="pop-nav" target="_blank" rel="noopener" href="${url}">🧭 在百度地图打开该段导航</a>`;
       if (real) {
-        MAPAPI.path(gRoute, geo.path, { color, weight: 4, dash: st.d, popup });
+        MAPAPI.path(gRoute, geo.path, { color, weight: st.w, dash: st.d, popup });
         geo.path.forEach(([lng, lat]) => allPts.push({ lng, lat }));
       } else {
         // 详细折线未到之前先用直线兜底；取数失败 / 未配 AK 时明确标注是直线示意
         const note = !MAPS.available()
           ? '<br><i>未配置百度 AK，按直线示意</i>'
           : tried ? '<br><i>未获取到详细路线，按直线示意</i>' : '<br><i>路线加载中…</i>';
-        MAPAPI.line(gRoute, a, b, { color, weight: 3, dash: '4,8', popup: popup + note });
+        MAPAPI.line(gRoute, a, b, { color, weight: Math.max(2.5, st.w - 1), dash: st.d || '4,8', popup: popup + note });
       }
+      // 路段中点放一个方式圆标：三种地图后端都能显示，不依赖虚线样式
+      const mid = real
+        ? { lng: geo.path[Math.floor(geo.path.length / 2)][0], lat: geo.path[Math.floor(geo.path.length / 2)][1] }
+        : { lng: (a.lng + b.lng) / 2, lat: (a.lat + b.lat) / 2 };
+      badges.push({ pt: mid, html: `<div class="mode-badge ${st.cls}">${st.icon}</div>`, popup });
       legs.push({ a, b, modeId: chosen.id });
       legIdx++;
       // 图钉（先收集，路径全部画完后再压在上层）
@@ -1977,6 +1991,8 @@ function drawRoute(fit, skipFetch) {
     });
   });
   pins.forEach(({ pt, html, popup }) => MAPAPI.pin(gRoute, pt, { html, w: html.includes('hub') ? 26 : 30, h: 26, z: 500, popup }));
+  // 方式圆标压在路线之上、编号图钉之下
+  badges.forEach(({ pt, html, popup }) => MAPAPI.pin(gRoute, pt, { html, w: 22, h: 22, z: 300, popup }));
   if (fit) fitPts(allPts);
   // 详细路线还在取：地图先画直线兜底，并在右下角提示进度
   const pending = legs.filter(l => !routeGeo.has(geoKeyOf(l.a, l.b, l.modeId))).length;
@@ -2552,6 +2568,7 @@ function applySlots(slots, rawText) {
     state.from = CITYMAP[slots.from];
   }
   state.to = CITYMAP[city];
+  syncComboInputs();
   $('#arriveDate').value = start;
   $('#returnDate').value = addDaysStr(start, days - 1);
   updateTripHint();
@@ -2802,55 +2819,98 @@ function fillCitySelect(sel, def) {
   sel.value = def;
 }
 
-/* 城市搜索：只在已加载的城市列表里过滤，不发任何网络请求 */
-function filterCitySelect(sel, q) {
-  const needle = (q || '').trim().toLowerCase();
-  let visible = 0;
-  sel.querySelectorAll('optgroup').forEach(g => {
-    let any = false;
-    g.querySelectorAll('option').forEach(o => {
-      const hit = !needle || o.value.toLowerCase().includes(needle);
-      o.hidden = !hit;
-      if (hit) { any = true; visible++; }
-    });
-    g.hidden = !any;
-  });
-  return visible;
+/* 城市选择：一个框同时负责「搜索」和「选择」
+ * 输入即过滤，点条目立刻生效（不需要回车）；点右侧箭头展开完整分组列表。
+ * 真正的值仍写回隐藏的 <select>，其余逻辑不用改。 */
+function syncComboInputs() {
+  const f = $('#fromComboInput'), t = $('#toComboInput');
+  if (f) f.value = $('#fromSel').value;
+  if (t) t.value = $('#toSel').value;
 }
 
-function bindCitySearch(inputId, selId) {
-  const input = $('#' + inputId);
-  const sel = $('#' + selId);
-  if (!input || !sel) return;
-  const apply = () => {
-    const q = input.value.trim();
-    const n = filterCitySelect(sel, q);
-    input.classList.toggle('has-q', !!q);
-    input.title = q ? `匹配 ${n} 个城市` : '';
+function initCityCombo(selId, inputId, listId) {
+  const sel = $('#' + selId), input = $('#' + inputId), list = $('#' + listId);
+  if (!sel || !input || !list) return;
+  const items = [...sel.querySelectorAll('option')].map(o => ({
+    city: o.value,
+    group: o.parentElement && o.parentElement.tagName === 'OPTGROUP' ? o.parentElement.label : '',
+  }));
+  let active = -1;
+
+  const render = (q) => {
+    const needle = (q || '').trim().toLowerCase();
+    const hits = items.filter(it => !needle || it.city.toLowerCase().includes(needle));
+    active = hits.length ? 0 : -1;
+    let html = '', last = null;
+    hits.forEach((it, i) => {
+      if (it.group !== last) {
+        html += `<div class="combo-group">${esc(it.group)}</div>`;
+        last = it.group;
+      }
+      html += `<div class="combo-item${i === active ? ' active' : ''}" data-city="${esc(it.city)}">${esc(it.city)}</div>`;
+    });
+    list.innerHTML = html || '<div class="combo-empty">没有匹配的城市</div>';
   };
-  input.addEventListener('input', apply);
-  input.addEventListener('keydown', e => {
-    if (e.key === 'Enter') {
+  const open = () => { list.classList.remove('hidden'); input.setAttribute('aria-expanded', 'true'); };
+  const close = () => { list.classList.add('hidden'); input.setAttribute('aria-expanded', 'false'); };
+  const choose = (city) => {
+    if (!CITYMAP[city]) return;
+    sel.value = city;
+    sel.dispatchEvent(new Event('change'));
+    input.value = city;
+    close();
+  };
+
+  input.addEventListener('focus', () => { render(''); open(); input.select(); });
+  input.addEventListener('click', () => { render(''); open(); });
+  input.addEventListener('input', () => { render(input.value); open(); });  // 边打边筛，不用回车
+
+  const arrow = input.parentElement.querySelector('.combo-arrow');
+  if (arrow) arrow.addEventListener('click', (e) => {
+    e.preventDefault();
+    if (list.classList.contains('hidden')) { render(''); open(); input.focus(); } else close();
+  });
+
+  // mousedown 而不是 click：抢在输入框失焦前选中
+  list.addEventListener('mousedown', (e) => {
+    const it = e.target.closest('.combo-item');
+    if (!it) return;
+    e.preventDefault();
+    choose(it.dataset.city);
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.combo')) close();
+  });
+
+  input.addEventListener('keydown', (e) => {
+    const els = [...list.querySelectorAll('.combo-item')];
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      if (list.classList.contains('hidden')) { render(''); open(); }
+      if (!els.length) return;
       e.preventDefault();
-      const first = [...sel.querySelectorAll('option')].find(o => !o.hidden);
-      if (!first) return;
-      sel.value = first.value;
-      sel.dispatchEvent(new Event('change'));
-      input.value = first.value;
-      input.classList.remove('has-q');
-      filterCitySelect(sel, '');
+      active = (active + (e.key === 'ArrowDown' ? 1 : -1) + els.length) % els.length;
+      els.forEach((el, i) => el.classList.toggle('active', i === active));
+      els[active].scrollIntoView({ block: 'nearest' });
+    } else if (e.key === 'Enter') {
+      e.preventDefault();  // 回车只是可选加速键
+      if (els[active]) choose(els[active].dataset.city);
+      else if (els[0]) choose(els[0].dataset.city);
     } else if (e.key === 'Escape') {
-      input.value = '';
-      apply();
+      close();
+      input.value = sel.value;
     }
   });
+
+  sel.addEventListener('change', syncComboInputs);
+  input.value = sel.value;
 }
 
 function bind() {
   fillCitySelect($('#fromSel'), state.from.name);
   fillCitySelect($('#toSel'), state.to.name);
-  bindCitySearch('fromSearch', 'fromSel');
-  bindCitySearch('toSearch', 'toSel');
+  initCityCombo('fromSel', 'fromComboInput', 'fromComboList');
+  initCityCombo('toSel', 'toComboInput', 'toComboList');
   fillDepartPoints();
   refreshHotelUI();
   const today = fmtISO(new Date());
@@ -2895,12 +2955,14 @@ function bind() {
     const f = $('#fromSel').value;
     $('#fromSel').value = $('#toSel').value;
     $('#toSel').value = f;
+    syncComboInputs();
   });
 
   $('#quickCities').addEventListener('click', e => {
     const b = e.target.closest('button[data-city]');
     if (!b) return;
     $('#toSel').value = b.dataset.city;
+    syncComboInputs();
     state.from = CITYMAP[$('#fromSel').value];
     state.to = CITYMAP[b.dataset.city];
     doQuery();
@@ -2943,6 +3005,7 @@ function bind() {
     if (jump) {
       const name = jump.dataset.gotoCity;
       $('#toSel').value = name;
+      syncComboInputs();
       state.to = CITYMAP[name];
       refreshHotelUI();
       state.transport = null;

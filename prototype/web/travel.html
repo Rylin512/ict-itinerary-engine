@@ -48,13 +48,23 @@
       <div class="field-row">
         <div class="field">
           <label>出发地</label>
-          <input id="fromSearch" class="city-search" placeholder="搜索城市，如 成都 / 上海" autocomplete="off">
-          <select id="fromSel"></select>
+          <div class="combo">
+            <input id="fromComboInput" class="combo-input" type="text" placeholder="搜索或选择城市"
+                   autocomplete="off" role="combobox" aria-expanded="false">
+            <button class="combo-arrow" type="button" tabindex="-1" aria-label="展开城市列表">▾</button>
+            <div id="fromComboList" class="combo-list hidden"></div>
+            <select id="fromSel" class="combo-native" tabindex="-1" aria-hidden="true"></select>
+          </div>
         </div>
         <div class="field">
           <label>目的地</label>
-          <input id="toSearch" class="city-search" placeholder="搜索城市，如 成都 / 上海" autocomplete="off">
-          <select id="toSel"></select>
+          <div class="combo">
+            <input id="toComboInput" class="combo-input" type="text" placeholder="搜索或选择城市"
+                   autocomplete="off" role="combobox" aria-expanded="false">
+            <button class="combo-arrow" type="button" tabindex="-1" aria-label="展开城市列表">▾</button>
+            <div id="toComboList" class="combo-list hidden"></div>
+            <select id="toSel" class="combo-native" tabindex="-1" aria-hidden="true"></select>
+          </div>
         </div>
       </div>
       <div class="field hotel-field">
@@ -241,14 +251,8 @@
     </div>
     <div id="map"></div>
     <div class="map-foot">
+      <div id="legend" class="legend hidden"></div>
       <div id="mapHint" class="map-hint">选择城市后，这里展示两地位置与景点分布</div>
-    </div>
-    <div id="legend" class="legend hidden">
-      <div><i class="sw walk"></i>步行</div>
-      <div><i class="sw bike"></i>骑行</div>
-      <div><i class="sw transit"></i>公交地铁</div>
-      <div><i class="sw taxi"></i>打车</div>
-      <div><i class="sw hub"></i>住宿/出发点</div>
     </div>
     <div id="routeLoading" class="route-loading hidden" role="status" aria-live="polite">
       <span class="rl-spin" aria-hidden="true"></span>
