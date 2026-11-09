@@ -133,7 +133,7 @@ const BAIDU = {
     const pp = pt => `${pt.lat.toFixed(6)},${pt.lng.toFixed(6)}`;
     return `https://api.map.baidu.com/direction?origin=${pp(fromPt)}&destination=${pp(toPt)}`
       + `&mode=${mode}&region=${encodeURIComponent(region || '')}`
-      + `&coord_type=gcj02&output=html&src=ict-itinerary-engine`;
+      + `&coord_type=gcj02&output=html&src=itinerary-engine`;
   },
 
   // —— 地点检索 / 模糊搜索 / 详情：本地代理 → 百度 place/v2 ——

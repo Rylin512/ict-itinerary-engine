@@ -168,7 +168,7 @@ async function pairEstimate(cityName, a, b) { // 单对点估算：百度路网�
     transit: transitSync(km0),
     src: '估算',
   };
-  const baidu = await BAIDU.route(a, b);
+  const baidu = await MAPS.route(a, b);
   const r = baidu || await osrmRoute(a, b);
   if (r) {
     est.src = baidu ? '百度地图路网' : 'OSRM 实际路网';
@@ -195,7 +195,7 @@ function resetRoutes() {         // 酒店或景点坐标变化后，旧路网�
 
 /* --- 景点真实出入口：用百度地点检索的 navi_location 替换 POI 近似坐标 --- */
 async function ensureSpotNav() {
-  if (!BAIDU.available()) return false;
+  if (!MAPS.available()) return false;
   const todo = state.selected.filter(id => {
     const p = POIMAP[id];
     return p && !p.navTried;
@@ -205,7 +205,7 @@ async function ensureSpotNav() {
     const p = POIMAP[id];
     p.navTried = true;
     if (!p.name) continue;
-    const places = await BAIDU.searchPlaces(p.name, state.to.name, 3);
+    const places = await MAPS.searchPlaces(p.name, state.to.name, 3);
     const best = places.find(x => x.name === p.name)
       || places.find(x => x.name && (x.name.includes(p.name) || p.name.includes(x.name)))
       || places[0];
@@ -366,7 +366,7 @@ function fastestCandidates(km0) {
 // 每段可以是不同方式；公交地铁本身是「步行 + 地铁/公交」的混合路线。
 async function applyFastestModes(btn) {
   if (!state.modes.length) return;
-  if (!BAIDU.available()) {
+  if (!MAPS.available()) {
     toast('未配置百度服务器端 AK，先按距离智能估算');
     state.modes = state.modes.map((_, i) => {
       const ep = legEndpoints(i);
@@ -672,7 +672,7 @@ async function lookupStations(mode, city, q) {
   if (mode === 'flight') {
     if (!items.length) {
       const query = /机场|航站/.test(q) ? q : `${q} 机场`;
-      const places = await BAIDU.suggestPlaces(query, city);
+      const places = await MAPS.suggestPlaces(query, city);
       items = places
         .filter(p => /机场|航站|航空/.test(`${p.name || ''} ${p.tag || ''}`) || p.tag === '机场')
         .map(p => stationNormalizePlace(p, p.source === 'OpenStreetMap' ? 'OpenStreetMap 候选' : '百度地图候选'));
@@ -697,7 +697,7 @@ async function lookupStations(mode, city, q) {
     }
   } catch (e) { /* 12306 不可用时继续用内置 / 百度兜底 */ }
   if (!items.length) {
-    const places = await BAIDU.suggestPlaces(q, city);
+    const places = await MAPS.suggestPlaces(q, city);
     items = places.map(p => stationNormalizePlace(p, p.source === 'OpenStreetMap' ? 'OpenStreetMap 候选' : '百度地图候选'));
   }
   items = stationMergeItems(items);
@@ -741,9 +741,9 @@ async function resolveStationCoords(item, side) {
   let use = { ...item };
   if (use.lng != null && use.lat != null) return use;
   let found = null;
-  if (use.uid) found = await BAIDU.placeDetail(use.uid);
+  if (use.uid) found = await MAPS.placeDetail(use.uid);
   if (!found) {
-    const places = await BAIDU.suggestPlaces(use.name, city.name);
+    const places = await MAPS.suggestPlaces(use.name, city.name);
     found = places.find(p => p.name === use.name)
       || places.find(p => (p.name || '').includes(use.name) || use.name.includes(p.name || ''))
       || places[0] || null;
@@ -1530,21 +1530,38 @@ const spotMarkers = {};         // 景点 id -> 圆点句柄（双后端通用�
 
 const MAPAPI = {
   async pickBackend() {
-    await BAIDU.probe();  // 先取本地配置：环境变量里的浏览器端 AK 在这里生效
+    await MAPS.probe();  // 先取本地配置：环境变量里的浏览器端 AK 在这里生效
+    if (MAPS.provider === 'amap') {
+      if (AMAP.key && await AMAP.load()) return 'amap';
+      return 'leaflet';
+    }
     if (BAIDU.browserKey && location.protocol.startsWith('http')) {
       if (await BAIDU.loadGL()) return 'baidu';
+    }
+    // 自动模式：没配百度浏览器端 AK、但有高德 key 时，用高德 JS API 做展示层
+    if (!BAIDU.browserKey && AMAP.key) {
+      if (await AMAP.load()) return 'amap';
     }
     return 'leaflet';
   },
 
   init(backend) {
     MAP_BACKEND = backend;
-    return backend === 'baidu' ? this._initBaidu() : this._initLeaflet();
+    if (backend === 'baidu') return this._initBaidu();
+    if (backend === 'amap') return this._initAmap();
+    return this._initLeaflet();
   },
 
   fit(pts) {
     if (!map || !pts.length) return;
-    if (MAP_BACKEND === 'baidu') {
+    if (MAP_BACKEND === 'amap') {
+      const lngs = pts.map(p => p.lng), lats = pts.map(p => p.lat);
+      map.setBounds(
+        new AMap.Bounds([Math.min(...lngs), Math.min(...lats)],
+                        [Math.max(...lngs), Math.max(...lats)]),
+        false, [42, 42, 42, 42],
+      );
+    } else if (MAP_BACKEND === 'baidu') {
       map.setViewport(pts.map(p => BAIDU.bd(p)), { margins: [42, 42, 42, 42] });
     } else {
       map.fitBounds(L.latLngBounds(pts.map(p => [p.lat, p.lng])), { padding: [42, 42] });
@@ -1555,7 +1572,18 @@ const MAPAPI = {
 
   // 两点连线（含弹窗）
   line(g, a, b, { color, weight = 4, dash = null, opacity = 0.85, popup }) {
-    if (MAP_BACKEND === 'baidu') {
+    if (MAP_BACKEND === 'amap') {
+      const pl = new AMap.Polyline({
+        path: [[a.lng, a.lat], [b.lng, b.lat]],
+        strokeColor: color, strokeWeight: weight, strokeOpacity: opacity,
+        strokeStyle: dash ? 'dashed' : 'solid', lineJoin: 'round',
+      });
+      if (popup) pl.on('click', () => {
+        new AMap.InfoWindow({ content: popup, offset: new AMap.Pixel(0, -10) })
+          .open(map, [a.lng, a.lat]);
+      });
+      map.add(pl); g.push(pl);
+    } else if (MAP_BACKEND === 'baidu') {
       const pl = new BMapGL.Polyline([BAIDU.bd(a), BAIDU.bd(b)], {
         strokeColor: color, strokeWeight: weight, strokeOpacity: opacity,
         strokeStyle: dash ? 'dashed' : 'solid',
@@ -1574,6 +1602,20 @@ const MAPAPI = {
   // 实际道路折线：pts 为 [[lng,lat],...]（GCJ-02），直接来自百度 direction/api
   path(g, pts, { color, weight = 4, dash = null, opacity = 0.9, popup } = {}) {
     if (!pts || pts.length < 2) return;
+    if (MAP_BACKEND === 'amap') {
+      const pl = new AMap.Polyline({
+        path: pts.map(([lng, lat]) => [lng, lat]),
+        strokeColor: color, strokeWeight: weight, strokeOpacity: opacity,
+        strokeStyle: dash ? 'dashed' : 'solid', lineJoin: 'round',
+      });
+      if (popup) pl.on('click', () => {
+        const mid = pts[Math.floor(pts.length / 2)];
+        new AMap.InfoWindow({ content: popup, offset: new AMap.Pixel(0, -10) })
+          .open(map, [mid[0], mid[1]]);
+      });
+      map.add(pl); g.push(pl);
+      return;
+    }
     if (MAP_BACKEND === 'baidu') {
       const line = new BMapGL.Polyline(pts.map(([lng, lat]) => BAIDU.bd({ lng, lat })), {
         strokeColor: color, strokeWeight: weight, strokeOpacity: opacity,
@@ -1595,7 +1637,17 @@ const MAPAPI = {
 
   // HTML 图钉（复用 .pin 样式）
   pin(g, pt, { html, w, h, popup, z = 0 }) {
-    if (MAP_BACKEND === 'baidu') {
+    if (MAP_BACKEND === 'amap') {
+      const mk = new AMap.Marker({
+        position: [pt.lng, pt.lat], content: html, anchor: 'top-left',
+        offset: new AMap.Pixel(-w / 2, -h / 2), zIndex: 500 + z,
+      });
+      if (popup) mk.on('click', () => {
+        new AMap.InfoWindow({ content: popup, offset: new AMap.Pixel(0, -10) })
+          .open(map, [pt.lng, pt.lat]);
+      });
+      map.add(mk); g.push(mk);
+    } else if (MAP_BACKEND === 'baidu') {
       const label = new BMapGL.Label(html, { position: BAIDU.bd(pt), offset: new BMapGL.Size(-w / 2, -h / 2) });
       if (label.domElement) {
         label.domElement.style.background = 'none';
@@ -1620,7 +1672,19 @@ const MAPAPI = {
   // 景点圆点（id 供勾选联动改色）
   dot(g, pt, { fill, px = 7, popup, onClick }) {
     let handle;
-    if (MAP_BACKEND === 'baidu') {
+    if (MAP_BACKEND === 'amap') {
+      const c = new AMap.CircleMarker({
+        center: [pt.lng, pt.lat], radius: px,
+        strokeColor: '#fff', strokeWeight: 2, fillColor: fill, fillOpacity: 0.95, zIndex: 120,
+      });
+      if (popup) c.on('click', () => {
+        new AMap.InfoWindow({ content: popup, offset: new AMap.Pixel(0, -10) })
+          .open(map, [pt.lng, pt.lat]);
+      });
+      if (onClick) c.on('click', onClick);
+      map.add(c); g.push(c);
+      handle = c;
+    } else if (MAP_BACKEND === 'baidu') {
       const c = new BMapGL.Circle(BAIDU.bd(pt), 130, {
         strokeColor: '#fff', strokeWeight: 2, fillColor: fill, fillOpacity: 0.95,
       });
@@ -1643,14 +1707,29 @@ const MAPAPI = {
 
   setDotFill(handle, fill) {
     if (MAP_BACKEND === 'baidu') handle.setFillColor(fill);
-    else handle.setStyle({ fillColor: fill });
+    else if (MAP_BACKEND === 'amap') {
+      try { handle.setOptions({ fillColor: fill }); } catch (e) { /* 老版本没有 setOptions */ }
+    } else handle.setStyle({ fillColor: fill });
   },
 
   _initLeaflet() {
     const m = L.map('map', { zoomControl: true });
     m.attributionControl.setPrefix(false);
-    // 底图：优先 OSM；连续失败（国内网络经常连不上 tile.openstreetmap.org）时
-    // 自动切到高德栅格瓦片。页面坐标本身就是 GCJ-02，与高德瓦片天然对齐。
+    const mk = () => {
+      const group = L.layerGroup().addTo(m);
+      group.clear = () => group.clearLayers();
+      return group;
+    };
+    // 用户在工具栏里显式选了高德：底图直接用高德栅格瓦片（GCJ-02，与页面坐标天然对齐）
+    if (typeof MAPS !== 'undefined' && MAPS.provider === 'amap') {
+      L.tileLayer('/api/tiles/{z}/{x}/{y}.png', {
+        maxZoom: 18, attribution: '© 高德地图',
+      }).addTo(m);
+      map = m;
+      return { inter: mk(), spots: mk(), route: mk() };
+    }
+    // 默认：优先 OSM；连续失败（国内网络经常连不上 tile.openstreetmap.org）时
+    // 自动切到高德栅格瓦片。
     let tiles = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19, attribution: '© OpenStreetMap',
     }).addTo(m);
@@ -1668,11 +1747,6 @@ const MAPAPI = {
     tiles.on('tileerror', () => { if (++tileErrs >= 4) useAmap(); });
     // 有些网络对 OSM 不是报错而是长时间挂起：1.5s 内一张瓦片都没成功就直接换源
     setTimeout(() => { if (!swapped && tileLoads === 0) useAmap(); }, 1500);
-    const mk = () => {
-      const group = L.layerGroup().addTo(m);
-      group.clear = () => group.clearLayers();
-      return group;
-    };
     map = m;
     return { inter: mk(), spots: mk(), route: mk() };
   },
@@ -1682,6 +1756,20 @@ const MAPAPI = {
     m.centerAndZoom(new BMapGL.Point(112.0, 32.8), 5);
     m.enableScrollWheelZoom(true);
     const mk = () => { const arr = []; arr.clear = () => arr.forEach(o => m.removeOverlay(o)); return arr; };
+    map = m;
+    return { inter: mk(), spots: mk(), route: mk() };
+  },
+
+  // 高德 JS API 2.0：与百度 GL 同为「整体替换」型后端，坐标直接用 GCJ-02
+  _initAmap() {
+    const m = new AMap.Map('map', {
+      zoom: 5, center: [112.0, 32.8], viewMode: '2D', resizeEnable: true,
+    });
+    const mk = () => {
+      const arr = [];
+      arr.clear = () => { if (arr.length) { m.remove(arr); arr.length = 0; } };
+      return arr;
+    };
     map = m;
     return { inter: mk(), spots: mk(), route: mk() };
   },
@@ -1751,7 +1839,7 @@ function showSpots(fit) {
 }
 
 function baiduNav(fromPt, toPt, mode, region) { // 百度 URI API 深链（免 AK，见 baidu.js）
-  return BAIDU.navUrl(fromPt, toPt, mode, region || state.to.name);
+  return MAPS.navUrl(fromPt, toPt, mode, region || state.to.name);
 }
 
 // 扁平段号 → 该段两端的点
@@ -1783,7 +1871,7 @@ function ensureGeo(a, b, modeId) {
   if (geoInFlight.has(key)) return geoInFlight.get(key);
   const epoch = geoToken;
   const mode = routeModeOf(modeId);
-  const p = BAIDU.routeMode(a, b, mode, state.to.name, state.to.name)
+  const p = MAPS.routeMode(a, b, mode, state.to.name, state.to.name)
     .then(r => {
       const good = r && r.path && r.path.length > 1 ? r : null;
       if (epoch === geoToken) routeGeo.set(key, good);
@@ -1797,7 +1885,7 @@ function ensureGeo(a, b, modeId) {
 // 逐段拉百度真实道路折线；每拿到一段就重绘（不清空已画好的部分）。
 // 2 QPS 的队列在 BAIDU.enqueue 里，服务端还有一道全局闸门，这里顺序请求即可。
 async function fetchLegGeometry(legs) {
-  if (!BAIDU.available()) return false;
+  if (!MAPS.available()) return false;
   const run = ++geoSeq;
   let changed = false;
   for (const { a, b, modeId } of legs) {
@@ -1872,7 +1960,7 @@ function drawRoute(fit, skipFetch) {
         geo.path.forEach(([lng, lat]) => allPts.push({ lng, lat }));
       } else {
         // 详细折线未到之前先用直线兜底；取数失败 / 未配 AK 时明确标注是直线示意
-        const note = !BAIDU.available()
+        const note = !MAPS.available()
           ? '<br><i>未配置百度 AK，按直线示意</i>'
           : tried ? '<br><i>未获取到详细路线，按直线示意</i>' : '<br><i>路线加载中…</i>';
         MAPAPI.line(gRoute, a, b, { color, weight: 3, dash: '4,8', popup: popup + note });
@@ -1892,7 +1980,7 @@ function drawRoute(fit, skipFetch) {
   if (fit) fitPts(allPts);
   // 详细路线还在取：地图先画直线兜底，并在右下角提示进度
   const pending = legs.filter(l => !routeGeo.has(geoKeyOf(l.a, l.b, l.modeId))).length;
-  if (BAIDU.available() && pending) {
+  if (MAPS.available() && pending) {
     showRouteLoading('正在加载详细路线', legs.length - pending, legs.length);
   } else {
     hideRouteLoading();
@@ -2077,7 +2165,7 @@ async function applyDepartCandidate(p, btn) {
       btn.disabled = true;
       if (meta) meta.textContent = '正在定位实际出入口…';
     }
-    const detail = await BAIDU.placeDetail(p.uid);
+    const detail = await MAPS.placeDetail(p.uid);
     if (btn) btn.disabled = false;
     if (seq !== departSeq || state.from.name !== city) return;
     if (detail) use = { ...p, ...detail };
@@ -2118,11 +2206,11 @@ async function searchDepartPoints() {
   departBusy = true;
   if (btn) { btn.disabled = true; btn.textContent = '搜索中…'; }
   try {
-    const places = await BAIDU.suggestPlaces(q, city);
+    const places = await MAPS.suggestPlaces(q, city);
     if (seq !== departSeq || state.from.name !== city) return;
     if (!places.length) {
       box.innerHTML = `<p class="poi-empty">没有找到「${esc(q)}」`
-        + (BAIDU.lastError ? `<br>${esc(BAIDU.lastError)}` : '')
+        + (MAPS.lastError ? `<br>${esc(MAPS.lastError)}` : '')
         + '<br>换个关键词再试，或 <button type="button" data-depart-retry="1">重试</button></p>';
       return;
     }
@@ -2278,7 +2366,9 @@ function openAiSettings() {
   $('#aiRealFields').classList.toggle('hidden', AI.cfg.provider === 'demo');
   $('#baiduAk').value = BAIDU.key || '';
   $('#baiduAkBrowser').value = BAIDU.browserKey || '';
-  $('#baiduStatus').textContent = BAIDU.serverStatus() + ' ｜ ' + BAIDU.browserStatus()
+  $('#routeProviderPref').value = MAPS.prefs.route;
+  $('#placeProviderPref').value = MAPS.prefs.place;
+  $('#baiduStatus').textContent = MAPS.statusText() + ' ｜ ' + BAIDU.browserStatus()
     + (AI.server ? ' · 本地 serve.py 代理在线' : ' · 未检测到本地 serve.py');
   $('#aiStatus').textContent = AI.statusText()
     + (AI.server ? ' · 本地 serve.py 代理在线' : ' · 未检测到本地 serve.py（file:// 或纯静态打开）');
@@ -2610,11 +2700,11 @@ async function searchHotels() {
   btn.textContent = '搜索中…';
   try {
     // 走百度地点输入提示（suggestion）：关键词不必完整命中 POI 名称
-    const places = await BAIDU.suggestPlaces(q, city);
+    const places = await MAPS.suggestPlaces(q, city);
     if (seq !== hotelSeq || state.to.name !== city) return;
     if (!places.length) {
       box.innerHTML = `<p class="muted" style="padding:10px 12px">没有找到「${esc(q)}」`
-        + (BAIDU.lastError ? `<br>${esc(BAIDU.lastError)}` : '')
+        + (MAPS.lastError ? `<br>${esc(MAPS.lastError)}` : '')
         + '<br>换个关键词再试，或 <button type="button" class="hotel-retry" data-hotel-retry="1">重试</button></p>';
       return;
     }
@@ -2663,7 +2753,7 @@ async function applyHotel(p, btn) {
       btn.disabled = true;
       if (meta) meta.textContent = '正在定位酒店出入口…';
     }
-    const detail = await BAIDU.placeDetail(p.uid);
+    const detail = await MAPS.placeDetail(p.uid);
     if (btn) btn.disabled = false;
     if (meta) meta.textContent = metaText;
     // 用户中途换了目的地或重新搜索/选别的酒店：丢弃这次结果
@@ -2712,9 +2802,55 @@ function fillCitySelect(sel, def) {
   sel.value = def;
 }
 
+/* 城市搜索：只在已加载的城市列表里过滤，不发任何网络请求 */
+function filterCitySelect(sel, q) {
+  const needle = (q || '').trim().toLowerCase();
+  let visible = 0;
+  sel.querySelectorAll('optgroup').forEach(g => {
+    let any = false;
+    g.querySelectorAll('option').forEach(o => {
+      const hit = !needle || o.value.toLowerCase().includes(needle);
+      o.hidden = !hit;
+      if (hit) { any = true; visible++; }
+    });
+    g.hidden = !any;
+  });
+  return visible;
+}
+
+function bindCitySearch(inputId, selId) {
+  const input = $('#' + inputId);
+  const sel = $('#' + selId);
+  if (!input || !sel) return;
+  const apply = () => {
+    const q = input.value.trim();
+    const n = filterCitySelect(sel, q);
+    input.classList.toggle('has-q', !!q);
+    input.title = q ? `匹配 ${n} 个城市` : '';
+  };
+  input.addEventListener('input', apply);
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const first = [...sel.querySelectorAll('option')].find(o => !o.hidden);
+      if (!first) return;
+      sel.value = first.value;
+      sel.dispatchEvent(new Event('change'));
+      input.value = first.value;
+      input.classList.remove('has-q');
+      filterCitySelect(sel, '');
+    } else if (e.key === 'Escape') {
+      input.value = '';
+      apply();
+    }
+  });
+}
+
 function bind() {
   fillCitySelect($('#fromSel'), state.from.name);
   fillCitySelect($('#toSel'), state.to.name);
+  bindCitySearch('fromSearch', 'fromSel');
+  bindCitySearch('toSearch', 'toSel');
   fillDepartPoints();
   refreshHotelUI();
   const today = fmtISO(new Date());
@@ -2848,7 +2984,7 @@ function bind() {
     if (btn.disabled) return;
     btn.disabled = true;
     const old = btn.textContent;
-    btn.textContent = BAIDU.available() ? '正在获取景点出入口坐标…' : '正在生成行程…';
+    btn.textContent = MAPS.available() ? '正在获取景点出入口坐标…' : '正在生成行程…';
     try {
       await ensureSpotNav();  // 用百度 navi_location 把景点坐标换成真实出入口
     } finally {
@@ -3086,14 +3222,28 @@ function bind() {
     BAIDU.key = $('#baiduAk').value.trim();
     BAIDU.browserKey = $('#baiduAkBrowser').value.trim();
     BAIDU.save();
+    // 高级分流：按能力指定供应商；任一项非 auto 时，工具栏显示「自定义」
+    const beforePrefs = JSON.stringify(MAPS.prefs);
+    MAPS.prefs = {
+      route: $('#routeProviderPref').value,
+      place: $('#placeProviderPref').value,
+    };
+    MAPS.savePrefs();
+    updateProviderButton();
+    if (JSON.stringify(MAPS.prefs) !== beforePrefs) {
+      routeEst.clear();
+      osrmCache.clear();
+    }
     $('#aiModal').classList.add('hidden');
     updateAiBadge();
     if (browserAkChanged && BAIDU.browserKey) {
       toast('浏览器端 AK 已保存，刷新页面后底图切换为百度地图');
+    } else if (MAPS.isCustom()) {
+      toast(`已按能力分流：路线→${MAPS.label(MAPS.prefs.route) || '自动'}，地点→${MAPS.label(MAPS.prefs.place) || '自动'}`);
     } else {
       toast(provider === 'demo' ? '已切换为离线演示模式（不联网）' : '配置已保存到本机浏览器');
     }
-    if (BAIDU.key || BAIDU.ready) ensureRoutes(); // 新 AK 立刻升级路网估算
+    if (MAPS.available()) ensureRoutes(); // 新 AK 立刻升级路网估算
   });
   $('#aiTest').addEventListener('click', testAi);
   $$('#aiModal [data-close], #aiOut [data-close]').forEach(b =>
@@ -3115,12 +3265,54 @@ function updateAiBadge() {
   b.textContent = `✨ AI · ${names[AI.cfg.provider] || AI.cfg.provider}${AI.ready() ? '' : '（未配置）'}`;
 }
 
+/* ================= 路网供应商一键切换 =================
+ * 两家开放平台都按秒限流，单家额度也有限。这里让用户（或现场演示）一键在
+ * 自动 / 百度 / 高德 之间切换，切换后立刻重新探测并按新供应商拉一遍路网。 */
+
+function updateProviderButton() {
+  const btn = $('#btnProvider');
+  if (!btn) return;
+  const name = MAPS.isCustom()
+    ? '自定义'
+    : (MAPS.provider === 'auto' ? '自动' : MAPS.label(MAPS.provider));
+  btn.textContent = '路网：' + name;
+  btn.title = MAPS.statusText();
+}
+
+function initProviderSwitch() {
+  const btn = $('#btnProvider');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    if (MAPS.isCustom()) {        // 高级设置生效时，点按直接进设置调整分流
+      openAiSettings();
+      return;
+    }
+    MAPS.cycle();
+    updateProviderButton();
+    await MAPS.probe();
+    updateProviderButton();
+    if (!MAPS.available()) {
+      toast('这一家还没配置 key：先在环境变量或设置面板里填上');
+      return;
+    }
+    routeEst.clear();          // 换供应商后旧里程作废，重新拉
+    osrmCache.clear();
+    ensureRoutes();
+    if (state.step >= 4) { renderTimeline(); drawRoute(false); }
+    const name = MAPS.provider === 'auto' ? '自动分流' : MAPS.label(MAPS.provider);
+    toast(`路网已切到 ${name}${MAPS.provider === 'amap' ? '，刷新后底图也换成高德' : ''}`);
+  });
+  updateProviderButton();
+}
+
 /* ================= 启动 ================= */
 
 bind();
+initProviderSwitch();
 gotoStep(1);
 updateAiBadge();
 AI.probeServer().then(updateAiBadge); // 检测本地 serve.py 代理是否在线
-BAIDU.probe().then(() => { // 百度 AK 就绪时，把估算升级为真实路网
-  if (BAIDU.ready && state.step >= 2) ensureRoutes();
+MAPS.probe().then(() => { // 地图服务就绪时，把估算升级为真实路网
+  updateProviderButton();
+  if (MAPS.available() && state.step >= 2) ensureRoutes();
 });
