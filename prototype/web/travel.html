@@ -19,7 +19,6 @@
     </div>
   </div>
   <div class="badges">
-    <span class="badge">华为 ICT 创新赛 · 赛题一</span>
     <button class="badge ghost link" id="btnAiSet" type="button">✨ <span id="aiBadge">AI 设置</span></button>
   </div>
 </header>
@@ -49,10 +48,12 @@
       <div class="field-row">
         <div class="field">
           <label>出发地</label>
+          <input id="fromSearch" class="city-search" placeholder="搜索城市，如 成都 / 上海" autocomplete="off">
           <select id="fromSel"></select>
         </div>
         <div class="field">
           <label>目的地</label>
+          <input id="toSearch" class="city-search" placeholder="搜索城市，如 成都 / 上海" autocomplete="off">
           <select id="toSel"></select>
         </div>
       </div>
@@ -230,10 +231,17 @@
   </section>
 
   <aside class="mapcard">
+    <div class="map-head">
+      <span class="map-title">路线图</span>
+      <div class="map-toolbar">
+        <button id="btnProvider" class="ghost-btn sm" title="在 自动 / 百度 / 高德 之间切换路网服务">路网：自动</button>
+        <button id="btnFitSpots" class="ghost-btn sm">查看全部景点</button>
+        <button id="btnFitRoute" class="ghost-btn sm">回到路线</button>
+      </div>
+    </div>
     <div id="map"></div>
-    <div class="map-toolbar">
-      <button id="btnFitSpots" class="ghost-btn sm">查看全部景点</button>
-      <button id="btnFitRoute" class="ghost-btn sm">回到路线</button>
+    <div class="map-foot">
+      <div id="mapHint" class="map-hint">选择城市后，这里展示两地位置与景点分布</div>
     </div>
     <div id="legend" class="legend hidden">
       <div><i class="sw walk"></i>步行</div>
@@ -242,7 +250,6 @@
       <div><i class="sw taxi"></i>打车</div>
       <div><i class="sw hub"></i>住宿/出发点</div>
     </div>
-    <div id="mapHint" class="map-hint">选择城市后，这里展示两地位置与景点分布</div>
     <div id="routeLoading" class="route-loading hidden" role="status" aria-live="polite">
       <span class="rl-spin" aria-hidden="true"></span>
       <span id="routeLoadingText">正在加载详细路线</span>
@@ -253,7 +260,7 @@
 <footer class="foot">
   页面为演示原型：城际交通时间/价格、市内通勤时长均为<b>估算值</b>；上车站/机场与出租车计价为公开资料整理（见数据文件来源标注）；
   攻略面板为演示数据；景点坐标为近似值（GCJ-02）。底图 © OpenStreetMap（配浏览器端 AK 后为百度地图）·
-  路网里程 © 百度地图开放平台（配服务器端 AK 后）/ OSRM。导航跳转经百度地图 URI API。
+  路网里程来自<b>百度地图 / 高德地图</b>双供应商（可在右上角一键切换，按 2 次/秒排队调用）/ OSRM。导航跳转经百度或高德 URI API。
   站点/机场/景点候补数据来自 OpenStreetMap（Nominatim / Overpass，ODbL 许可）与 12306 公开车站库，不占百度配额。
   算法与交互结构为真实实现。打车费用为出租车计价估算——滴滴/哈罗无公开 API，已预留适配位。
 </footer>
@@ -297,6 +304,26 @@
       <label>浏览器端 AK（JS API GL，地图展示层；保存并刷新后底图切换为百度地图）</label>
       <input id="baiduAkBrowser" type="password" placeholder="百度控制台 · 浏览器端 AK（Referer 白名单）">
     </div>
+    <p class="hint" style="margin:16px 0 8px;font-weight:600;color:var(--ink)">高级：按能力分流（可选）</p>
+    <p class="muted">默认「自动」：路线先走百度、地点先走高德，两家额度各摊一半。任一项指定后，地图工具栏的路网按钮会显示「自定义」。</p>
+    <div class="field-row">
+      <div class="field">
+        <label>路线规划（驾车/步行/公交）</label>
+        <select id="routeProviderPref">
+          <option value="auto">自动</option>
+          <option value="baidu">百度地图</option>
+          <option value="amap">高德地图</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>地点检索（POI/酒店/车站）</label>
+        <select id="placeProviderPref">
+          <option value="auto">自动</option>
+          <option value="baidu">百度地图</option>
+          <option value="amap">高德地图</option>
+        </select>
+      </div>
+    </div>
     <p class="hint" style="margin:16px 0 8px;font-weight:600;color:var(--ink)">本地持久缓存</p>
     <p class="muted" id="cacheStatus">地点与路线结果会保存到本机；超出上限时按使用频率自动清理低频条目。</p>
     <div class="field">
@@ -310,7 +337,7 @@
       <button id="aiTest" class="ghost-btn">测试连通</button>
       <button id="aiSave" class="primary">保存</button>
     </div>
-    <p class="hint">推荐：OpenRouter 免费模型（浏览器直连，无需本地服务）；答辩现场断网用「离线演示」通道。两类 key 永远不会写进代码仓库。</p>
+    <p class="hint">推荐：OpenRouter 免费模型（浏览器直连，无需本地服务）；现场断网时用「离线演示」通道。两类 key 永远不会写进代码仓库。</p>
   </div>
 </div>
 
@@ -330,6 +357,7 @@
 <script src="travel-guides.js"></script>
 <script src="ai.js"></script>
 <script src="baidu.js"></script>
+<script src="maps.js"></script>
 <script src="travel.js"></script>
 </body>
 </html>

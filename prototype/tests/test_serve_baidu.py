@@ -452,7 +452,7 @@ class TestHandler(unittest.TestCase):
 
 class TestBaiduCache(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.old = (serve.CACHE_ENABLED, serve.CACHE_DIR, serve.CACHE_FILE, serve._CACHE)
         serve.CACHE_ENABLED = True
         serve.CACHE_DIR = Path(self.tmp.name)
@@ -460,6 +460,12 @@ class TestBaiduCache(unittest.TestCase):
         serve._CACHE = None
 
     def tearDown(self):
+        # Windows 下 sqlite 连接不关掉会锁住临时目录，先关再删
+        if serve._CACHE is not None:
+            try:
+                serve._CACHE.close()
+            except Exception:
+                pass
         serve.CACHE_ENABLED, serve.CACHE_DIR, serve.CACHE_FILE, serve._CACHE = self.old
         self.tmp.cleanup()
 
@@ -686,7 +692,7 @@ class TestParseOverpass(unittest.TestCase):
 
 class TestFreeHandlers(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.old = (serve.CACHE_ENABLED, serve.CACHE_DIR, serve.CACHE_FILE, serve._CACHE)
         serve.CACHE_ENABLED = True
         serve.CACHE_DIR = Path(self.tmp.name)
@@ -694,6 +700,12 @@ class TestFreeHandlers(unittest.TestCase):
         serve._CACHE = None
 
     def tearDown(self):
+        # Windows 下 sqlite 连接不关掉会锁住临时目录，先关再删
+        if serve._CACHE is not None:
+            try:
+                serve._CACHE.close()
+            except Exception:
+                pass
         serve.CACHE_ENABLED, serve.CACHE_DIR, serve.CACHE_FILE, serve._CACHE = self.old
         self.tmp.cleanup()
 
@@ -754,7 +766,7 @@ class TestFreeHandlers(unittest.TestCase):
 
 class TestSqliteCache(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.old = (serve.CACHE_ENABLED, serve.CACHE_DIR, serve.CACHE_FILE,
                     serve._CACHE, serve._DB, serve._DB_PATH)
         serve.CACHE_ENABLED = True

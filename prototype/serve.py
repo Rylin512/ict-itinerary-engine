@@ -382,7 +382,7 @@ def build_upstream_request(body, key):
     }
     if "openrouter" in base_url.lower():
         headers["HTTP-Referer"] = "http://127.0.0.1:8765"
-        headers["X-Title"] = "ict-itinerary-engine"
+        headers["X-Title"] = "itinerary-engine"
     payload = {
         "model": model,
         "messages": messages,
@@ -1151,6 +1151,313 @@ def handle_baidu_driving(body, headers_in):
     return {"ok": True, **out}
 
 
+# ================= 高德地图开放平台（Web 服务 API） =================
+# 与百度适配层同构：入参同样是 [lng, lat]（GCJ-02，高德原生坐标系），
+# 出参同样是 {ok, mode, km, min, path} / {ok, places}，所以上层 /api/map/*
+# 可以无差别切换两家，把配额压力摊开。
+
+AMAP_BASE = "https://restapi.amap.com"
+AMAP_ROUTE_URLS = {
+    "driving": f"{AMAP_BASE}/v3/direction/driving",
+    "walking": f"{AMAP_BASE}/v3/direction/walking",
+    "riding": f"{AMAP_BASE}/v4/direction/bicycling",
+    "transit": f"{AMAP_BASE}/v3/direction/transit/integrated",
+}
+AMAP_PLACE_URL = f"{AMAP_BASE}/v3/place/text"
+AMAP_REVERSE_URL = f"{AMAP_BASE}/v3/geocode/regeo"
+
+# 高德 Web 服务个人配额通常 3 次/秒；默认留余量，可用 AMAP_MIN_INTERVAL 调整。
+AMAP_MIN_INTERVAL = float(os.environ.get("AMAP_MIN_INTERVAL", "0.34"))
+_AMAP_GATE = threading.Lock()
+_AMAP_LAST_CALL = [0.0]
+
+
+def amap_gate():
+    """高德侧全局节流：相邻上游调用间隔 ≥ AMAP_MIN_INTERVAL，并发请求在此排队。"""
+    with _AMAP_GATE:
+        wait = _AMAP_LAST_CALL[0] + AMAP_MIN_INTERVAL - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        _AMAP_LAST_CALL[0] = time.monotonic()
+
+
+def resolve_amap_key(header_key=None):
+    return header_key or os.environ.get("AMAP_MAP_KEY")
+
+
+def amap_ready():
+    return bool(os.environ.get("AMAP_MAP_KEY"))
+
+
+def amap_browser_key():
+    return os.environ.get("AMAP_BROWSER_KEY", "")
+
+
+def amap_config():
+    return {
+        "ready": amap_ready(),
+        "host": "restapi.amap.com",
+        "browserAK": amap_browser_key(),
+        "minInterval": int(AMAP_MIN_INTERVAL * 1000),
+    }
+
+
+def _amap_lnglat(pair):
+    """[lng, lat] -> 'lng,lat'。高德与页面同为 GCJ-02 且都是经度在前，不需要换序。"""
+    if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+        raise ValueError("from / to 需为 [经度, 纬度] 二元组")
+    return f"{_coord(pair[0])},{_coord(pair[1])}"
+
+
+def build_amap_route_url(key, from_pair, to_pair, mode="driving", city1=None):
+    if not key:
+        raise ValueError("未找到高德 key：请设置环境变量 AMAP_MAP_KEY 或在设置面板填写")
+    base = AMAP_ROUTE_URLS.get(mode)
+    if not base:
+        raise ValueError(f"高德暂不支持 {mode} 模式")
+    params = {
+        "origin": _amap_lnglat(from_pair),
+        "destination": _amap_lnglat(to_pair),
+        "key": key,
+    }
+    if mode == "transit":
+        # 高德公交必须给城市，否则直接返回 INVALID_PARAMS
+        params["city"] = city1 or "全国"
+        params["cityd"] = city1 or "全国"
+    return base + "?" + urllib.parse.urlencode(params)
+
+
+def _amap_ok(data):
+    if str(data.get("status")) != "1":
+        raise ValueError(f"高德返回 status={data.get('status')}：{data.get('info') or '未知错误'}")
+
+
+def _amap_polyline(text):
+    """'lng,lat;lng,lat' -> [[lng,lat], ...]（丢弃脏点）"""
+    pts = []
+    for chunk in (text or "").split(";"):
+        if "," not in chunk:
+            continue
+        a, b = chunk.split(",", 1)
+        try:
+            pts.append([round(float(a), 6), round(float(b), 6)])
+        except ValueError:
+            continue
+    return pts
+
+
+def parse_amap_route(data, mode="driving"):
+    """高德 v3（driving/walking/transit）与 v4（bicycling）统一成百度同款出参。
+
+    骑行 v4 的响应结构是 data.paths，且用车牌判断 errcode；其余为 route.paths。
+    """
+    if mode == "riding":
+        code = data.get("errcode")
+        if str(code) not in ("0", "None"):
+            raise ValueError(f"高德骑行返回 errcode={code}：{data.get('errmsg', '')}")
+        paths = (data.get("data") or {}).get("paths") or []
+    else:
+        _amap_ok(data)
+        route = data.get("route") or {}
+        paths = route.get("transits") if mode == "transit" else route.get("paths")
+        paths = paths or []
+    if not paths:
+        raise ValueError("高德未返回可用路线（可能起终点不可达）")
+    best = min(paths, key=lambda p: float(p.get("duration") or 1e18))
+    path = []
+    if mode == "transit":
+        for seg in best.get("segments") or []:
+            for st in ((seg.get("walking") or {}).get("steps") or []):
+                path += _amap_polyline(st.get("polyline"))
+            for line in ((seg.get("bus") or {}).get("buslines") or []):
+                path += _amap_polyline(line.get("polyline"))
+    else:
+        for st in best.get("steps") or []:
+            path += _amap_polyline(st.get("polyline"))
+    out = {
+        "mode": mode,
+        "km": round(float(best.get("distance") or 0) / 1000.0, 2),
+        "min": round(float(best.get("duration") or 0) / 60.0, 1),
+        "path": _thin_path(path),
+    }
+    if best.get("tolls") not in (None, "", []):
+        try:
+            out["cost"] = float(best["tolls"])
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def build_amap_place_url(key, query, region=None, page_size=10, page=1):
+    if not key:
+        raise ValueError("未找到高德 key：请设置环境变量 AMAP_MAP_KEY 或在设置面板填写")
+    if not query:
+        raise ValueError("query 必填")
+    params = {
+        "keywords": query,
+        "key": key,
+        "offset": max(1, min(int(page_size), 25)),
+        "page": max(1, int(page)),
+        "extensions": "base",
+    }
+    if region:
+        params["city"] = region
+    return AMAP_PLACE_URL + "?" + urllib.parse.urlencode(params)
+
+
+def parse_amap_place(data):
+    """高德 poi 与百度 place 统一结构。
+
+    高德没有 navi_location，所以 hasNav=False、导航点回退到地址坐标；
+    前端拿到 hasNav=False 会按景点中心走，不影响可用性。
+    """
+    _amap_ok(data)
+    places = []
+    for item in data.get("pois") or []:
+        loc = _lnglat(item.get("location"))
+        if not loc:
+            continue
+        addr = item.get("address")
+        if isinstance(addr, list):
+            addr = "".join(addr)
+        tel = item.get("tel")
+        places.append({
+            "name": item.get("name") or "",
+            "address": addr or "",
+            "lng": loc[0], "lat": loc[1],
+            "navLng": loc[0], "navLat": loc[1],
+            "hasNav": False,
+            "tag": item.get("type") or "",
+            "uid": f"amap:{item.get('id')}" if item.get("id") else "",
+            "tel": tel if isinstance(tel, str) else "",
+        })
+    return places
+
+
+def _amap_request(url, timeout=15):
+    """调用高德 Web 服务：全局节流 + 统一错误文案，返回 (data, error)。"""
+    amap_gate()
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8")), None
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:300]
+        return None, f"高德返回 {exc.code}：{detail}"
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return None, f"高德连接失败：{exc}"
+    except json.JSONDecodeError:
+        return None, "高德响应不是合法 JSON"
+
+
+def handle_amap_route(body, headers_in):
+    mode = body.get("mode") or "driving"
+    try:
+        url = build_amap_route_url(
+            resolve_amap_key(headers_in.get("X-Amap-Key")),
+            body.get("from") or [], body.get("to") or [], mode, body.get("city1"),
+        )
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    data, err = _amap_request(url)
+    if err:
+        return {"ok": False, "error": err}
+    try:
+        out = parse_amap_route(data, mode)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, **out}
+
+
+def handle_amap_place(body, headers_in):
+    try:
+        url = build_amap_place_url(
+            resolve_amap_key(headers_in.get("X-Amap-Key")),
+            body.get("query") or "", body.get("region"), body.get("pageSize") or 10,
+        )
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    data, err = _amap_request(url)
+    if err:
+        return {"ok": False, "error": err}
+    try:
+        return {"ok": True, "source": "amap", "places": parse_amap_place(data)}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+# ================= 双供应商路由（分摊配额 + 自动降级） =================
+# 两家都配了 key 时，不同能力默认落到不同供应商：
+#   - 路线规划量大且要折线，默认先百度，失败切高德；
+#   - POI 检索量大但轻，默认先高德，失败切百度。
+# 这样单家的 QPS 压力直接被摊薄一半，任何一家挂了也不影响页面。
+
+ROUTE_PROVIDER_ORDER = ("baidu", "amap")
+PLACE_PROVIDER_ORDER = ("amap", "baidu")
+_ALT_LOCK = threading.Lock()
+_ALT_STATE = [0]
+
+
+def map_config():
+    return {
+        "default": os.environ.get("MAP_PROVIDER", "auto"),
+        "providers": {
+            "baidu": {"label": "百度地图", **baidu_config()},
+            "amap": {"label": "高德地图", **amap_config()},
+        },
+        "capabilities": {
+            "route": list(ROUTE_PROVIDER_ORDER),
+            "place": list(PLACE_PROVIDER_ORDER),
+        },
+    }
+
+
+def _provider_available(name, headers_in):
+    if name == "baidu":
+        return bool(headers_in.get("X-Baidu-Ak") or baidu_ready())
+    return bool(headers_in.get("X-Amap-Key") or amap_ready())
+
+
+def _pick_providers(kind, requested, headers_in):
+    """返回候选顺序：显式指定则先它后另一家；auto 则按能力默认顺序轮换起点。"""
+    base = ROUTE_PROVIDER_ORDER if kind == "route" else PLACE_PROVIDER_ORDER
+    if requested in ("baidu", "amap"):
+        other = "amap" if requested == "baidu" else "baidu"
+        order = [requested, other]
+    elif requested == "auto":
+        with _ALT_LOCK:
+            flip = _ALT_STATE[0] % 2
+            _ALT_STATE[0] += 1
+        order = list(base[flip:] + base[:flip])
+    else:
+        order = list(base)
+    return [name for name in order if _provider_available(name, headers_in)] or list(base[:1])
+
+
+def handle_map_route(body, headers_in):
+    errors = []
+    for name in _pick_providers("route", body.get("provider"), headers_in):
+        handler = handle_baidu_route if name == "baidu" else handle_amap_route
+        out = handler(body, headers_in)
+        if out.get("ok"):
+            out["provider"] = name
+            return out
+        errors.append(f"{name}: {out.get('error', '失败')}")
+    return {"ok": False, "error": "；".join(errors) or "没有可用的地图服务"}
+
+
+def handle_map_place(body, headers_in):
+    errors = []
+    for name in _pick_providers("place", body.get("provider"), headers_in):
+        handler = handle_baidu_place if name == "baidu" else handle_amap_place
+        out = handler(body, headers_in)
+        if out.get("ok") and out.get("places"):
+            out["provider"] = name
+            return out
+        errors.append(f"{name}: {out.get('error') or '无结果'}")
+    return {"ok": False, "error": "；".join(errors) or "没有可用的地图服务", "places": []}
+
+
 # ================= 地图瓦片代理（Leaflet 底图兜底） =================
 # 设备/浏览器直连瓦片服务偶尔会被网络策略拦住（本机 Firefox 沙箱就是如此）；
 # 由本地 serve.py 代取高德瓦片并缓存，页面在 OSM 不可达时改用
@@ -1188,7 +1495,7 @@ def fetch_amap_tile(z, x, y):
         return cached
     url = AMAP_TILE_URL.format(sub=1 + ((x + y) % 4), x=x, y=y, z=z)
     req = urllib.request.Request(url, headers={
-        "User-Agent": "Mozilla/5.0 (compatible; ict-itinerary-engine/1.0)",
+        "User-Agent": "Mozilla/5.0 (compatible; itinerary-engine/1.0)",
         "Referer": "https://www.amap.com/",
     })
     with urllib.request.urlopen(req, timeout=10) as resp:
@@ -1340,7 +1647,7 @@ def handle_rail_stations(query_string):
 # 景点：Overpass 免费查询城市周边 tourism / historic 要素，补齐未深度收录城市。
 # 两者都带持久缓存和 1 次/秒闸门，避免给志愿者服务造成压力。
 
-FREE_UA = "ict-itinerary-engine/0.1 (local demo; free-data fallback)"
+FREE_UA = "itinerary-engine/0.1 (local demo; free-data fallback)"
 OVERPASS_URLS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
@@ -1614,6 +1921,10 @@ class Handler(SimpleHTTPRequestHandler):
             return self._send(ai_config())
         if path == "/api/baidu-config":
             return self._send(baidu_config())
+        if path == "/api/amap-config":
+            return self._send(amap_config())
+        if path == "/api/map/config":
+            return self._send(map_config())
         if path == "/api/rail-stations":
             return self._send(handle_rail_stations(parsed_url.query))
         if path == "/api/free/places":
@@ -1650,6 +1961,14 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._send(handle_baidu_route(body, self.headers))
             if path == "/api/baidu/driving":
                 return self._send(handle_baidu_driving(body, self.headers))
+            if path == "/api/amap/route":
+                return self._send(handle_amap_route(body, self.headers))
+            if path == "/api/amap/place":
+                return self._send(handle_amap_place(body, self.headers))
+            if path == "/api/map/route":
+                return self._send(handle_map_route(body, self.headers))
+            if path == "/api/map/place":
+                return self._send(handle_map_place(body, self.headers))
             if path == "/api/cache/config":
                 return self._send(handle_cache_config(body))
             self._send({"error": "not found"}, 404)

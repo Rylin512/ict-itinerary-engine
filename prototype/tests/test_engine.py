@@ -1,4 +1,4 @@
-"""回归测试：不测 UI，只测"敢不敢拿去答辩"的三件事。
+"""回归测试：不测 UI，只测"敢不敢上线"的三件事。
 
     python -m unittest discover -s tests -t . -v
 """
