@@ -105,17 +105,21 @@ const AI = {
       temperature: opts.temperature,
       maxTokens: opts.maxTokens,
     };
-    const headers = { 'Content-Type': 'application/json' };
-    if (this.cfg.key) headers['X-Api-Key'] = this.cfg.key;
-
     // DeepSeek 官方没有 CORS：没本地代理就直接给可行动的报错
+    const useProxy = !!this.server;
     if (!this.server) {
       const host = this.cfg.baseURL.toLowerCase();
       if (host.includes('api.deepseek.com')) {
         return { ok: false, via: 'direct', error: 'DeepSeek 官方接口不允许浏览器直连（CORS）。请在 prototype 目录运行 `python serve.py` 后从 http://127.0.0.1:8765/travel.html 打开本页，或改用 OpenRouter（有免费模型）。' };
       }
     }
-    const useProxy = !!this.server;
+    // key 的传递方式：走本地代理用 X-Api-Key（serve.py 从该头取）；
+    // 浏览器直连必须用 OpenAI 兼容标准的 Authorization: Bearer，否则 401
+    const headers = { 'Content-Type': 'application/json' };
+    if (this.cfg.key) {
+      if (useProxy) headers['X-Api-Key'] = this.cfg.key;
+      else headers['Authorization'] = `Bearer ${this.cfg.key}`;
+    }
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {

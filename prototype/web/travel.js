@@ -3341,9 +3341,14 @@ function bind() {
   $('#aiTest').addEventListener('click', testAi);
   $$('#aiModal [data-close], #aiOut [data-close]').forEach(b =>
     b.addEventListener('click', () => b.closest('.modal').classList.add('hidden')));
-  $$('.modal').forEach(m => m.addEventListener('click', e => {
-    if (e.target === m) m.classList.add('hidden');
-  }));
+  // 点遮罩关闭：按下与松开都在遮罩上才算。在输入框里拖选/长按文字时手指滑出
+  // 边界、click 落在遮罩上（手机全选 API key 时高发），不能把弹窗关掉。
+  $$('.modal').forEach(m => {
+    m.addEventListener('pointerdown', e => { m._downOnBackdrop = (e.target === m); });
+    m.addEventListener('click', e => {
+      if (e.target === m && m._downOnBackdrop) m.classList.add('hidden');
+    });
+  });
 
   // AI 讲解 / 一句话规划
   $('#btnExplain').addEventListener('click', aiExplain);
