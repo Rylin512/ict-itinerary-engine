@@ -420,7 +420,9 @@ def ai_config():
     }
 
 
-def call_upstream(url, headers, payload, timeout=120):
+def call_upstream(url, headers, payload, timeout=60):
+    """60s 上限与前端 AI.chat 的默认超时对齐：推理模型太慢就快速失败，
+    避免页面"生成中"干等两分钟才报错（现场演示最伤观感）。"""
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     with urllib.request.urlopen(req, timeout=timeout) as resp:

@@ -90,12 +90,14 @@ const AI = {
     return `${this.cfg.model} · ${viaProxy ? '经本地 serve.py 代理' : '浏览器直连'} · ${keyFrom}`;
   },
 
-  // 统一入口：messages=[{role, content}]，opts={task:'explain'|'qa'|'nlplan', temperature, maxTokens}
+  // 统一入口：messages=[{role, content}]，opts={task, temperature, maxTokens, timeoutMs}
   async chat(messages, opts = {}) {
     if (this.cfg.provider === 'demo') {
       await new Promise(r => setTimeout(r, 350)); // 模拟一点延迟，演示更真实
       return { ok: true, content: this._demo(messages, opts.task || ''), via: 'demo' };
     }
+    // 超时保护：推理模型（如 deepseek-r1:free）思考可达几分钟，不设上限页面会一直"生成中"
+    const timeoutMs = opts.timeoutMs || 60000;
     const body = {
       baseURL: this.cfg.baseURL,
       model: this.cfg.model,
@@ -114,10 +116,13 @@ const AI = {
       }
     }
     const useProxy = !!this.server;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       const r = await fetch(useProxy ? '/api/llm' : (this.cfg.baseURL.replace(/\/$/, '') + '/chat/completions'), {
         method: 'POST',
         headers,
+        signal: ctrl.signal,
         body: JSON.stringify(useProxy ? body : {
           model: this.cfg.model,
           messages,
@@ -133,7 +138,13 @@ const AI = {
       if (!r.ok) return { ok: false, via: 'direct', error: `上游返回 ${r.status}：${JSON.stringify(data).slice(0, 300)}` };
       return { ok: true, content, via: 'direct' };
     } catch (e) {
+      if (ctrl.signal.aborted) {
+        return { ok: false, via: useProxy ? 'proxy' : 'direct', timeout: true,
+          error: `AI 通道 ${Math.round(timeoutMs / 1000)} 秒无响应，已中断。推理模型（deepseek-r1 等）首轮思考较慢，可换更快的模型（deepseek-chat / V3），或在「AI 设置 → 测试连通」确认通道可用后重试。` };
+      }
       return { ok: false, via: useProxy ? 'proxy' : 'direct', error: `请求失败：${e.message}` };
+    } finally {
+      clearTimeout(timer);
     }
   },
 

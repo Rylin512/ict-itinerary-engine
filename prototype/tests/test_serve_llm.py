@@ -89,6 +89,18 @@ class TestBuildRequest(unittest.TestCase):
         with self.assertRaises(ValueError):
             serve.build_upstream_request(self._body(), None)
 
+    def test_call_upstream_timeout_is_capped(self):
+        # 前端 AI.chat 60s 就中断请求；上游等待必须 ≤ 前端超时，
+        # 否则浏览器已放弃、页面永远停在"生成中"（AI 使用卡住的根因之一）。
+        captured = {}
+        resp = mock.MagicMock()
+        resp.read.return_value = b'{"ok":true}'
+        resp.__enter__.return_value = resp
+        with mock.patch("serve.urllib.request.urlopen",
+                        side_effect=lambda req, timeout: captured.update(t=timeout) or resp):
+            serve.call_upstream("https://api.deepseek.com/v1/chat/completions", {}, {})
+        self.assertLessEqual(captured["t"], 60)
+
 
 class TestAiConfig(unittest.TestCase):
     def test_channels_report_readiness_only(self):

@@ -2322,43 +2322,51 @@ function renderGuide() {
 }
 
 async function aiGenGuide() {
-  if (!aiGuard()) return;
-  const city = state.to.name;
-  $('#guideGen').textContent = '生成中…';
-  const messages = [
-    { role: 'system', content: '你是旅行攻略编辑。为目的地城市生成简明攻略 JSON：{"food":[{"t":"条目名","d":"两句话说明"}],"stay":[...],"tips":[...],"ideas":[{"t":"行程名","d":"按天一句话"}]}。food/stay/tips 各 3-4 条，ideas 1-2 条；内容基于你的公开常识，不要编造具体店名价格，用「区域/类型」表述；只输出 JSON。' },
-    { role: 'user', content: `目的地：${city}` },
-  ];
-  const r = await AI.chat(messages, { task: 'guide', temperature: 0.5, maxTokens: 1200 });
-  $('#guideGen').textContent = '让 AI 生成该城市攻略';
-  if (!r.ok) return toast(`生成失败：${r.error.slice(0, 80)}`);
-  const data = AI.extractJSON(r.content);
-  if (!data || !data.food) return toast('AI 返回内容无法解析为攻略，请重试');
-  data.food = (data.food || []).map(i => ({ ...i, src: 'AI 生成，仅供参考' }));
-  data.stay = (data.stay || []).map(i => ({ ...i, src: 'AI 生成，仅供参考' }));
-  data.tips = (data.tips || []).map(i => ({ ...i, src: 'AI 生成，仅供参考' }));
-  data.ideas = (data.ideas || []).map(i => ({ ...i, src: 'AI 生成，仅供参考' }));
-  localStorage.setItem(GUIDE_LS(city), JSON.stringify(data));
-  renderGuide();
-  toast(`已生成「${city}」攻略（存本机缓存）`);
+  if (!aiGuard() || !aiBegin()) return;
+  try {
+    const city = state.to.name;
+    $('#guideGen').textContent = '生成中…';
+    const messages = [
+      { role: 'system', content: '你是旅行攻略编辑。为目的地城市生成简明攻略 JSON：{"food":[{"t":"条目名","d":"两句话说明"}],"stay":[...],"tips":[...],"ideas":[{"t":"行程名","d":"按天一句话"}]}。food/stay/tips 各 3-4 条，ideas 1-2 条；内容基于你的公开常识，不要编造具体店名价格，用「区域/类型」表述；只输出 JSON。' },
+      { role: 'user', content: `目的地：${city}` },
+    ];
+    const r = await AI.chat(messages, { task: 'guide', temperature: 0.5, maxTokens: 1200 });
+    $('#guideGen').textContent = '让 AI 生成该城市攻略';
+    if (!r.ok) return toast(`生成失败：${r.error.slice(0, 80)}`);
+    const data = AI.extractJSON(r.content);
+    if (!data || !data.food) return toast('AI 返回内容无法解析为攻略，请重试');
+    data.food = (data.food || []).map(i => ({ ...i, src: 'AI 生成，仅供参考' }));
+    data.stay = (data.stay || []).map(i => ({ ...i, src: 'AI 生成，仅供参考' }));
+    data.tips = (data.tips || []).map(i => ({ ...i, src: 'AI 生成，仅供参考' }));
+    data.ideas = (data.ideas || []).map(i => ({ ...i, src: 'AI 生成，仅供参考' }));
+    localStorage.setItem(GUIDE_LS(city), JSON.stringify(data));
+    renderGuide();
+    toast(`已生成「${city}」攻略（存本机缓存）`);
+  } finally {
+    aiEnd();
+  }
 }
 
 async function guideAsk() {
   const q = $('#guideQ').value.trim();
   if (!q) return toast('输入问题，比如「住哪个区域」「必吃什么」');
-  if (!aiGuard()) return;
-  const city = state.to.name;
-  const ctx = retrieveGuide(city, q);
-  const ctxText = ctx.map(i => `- [${i.cat}] ${i.t}：${i.d}（${i.src}）`).join('\n') || '（攻略库暂无该城市条目）';
-  const pois = (POIS[city] || []).map(p => `${p.name}（${tierLabel(p.tier)}；${p.note || ''}）`).join('；') || '（该城市暂无景点数据）';
-  openAiOut('🤖 目的地问答', '检索攻略库并生成回答…');
-  const messages = [
-    { role: 'system', content: '你是目的地攻略问答助手。只允许基于给定条目回答；引用条目时注明来源；条目里没有的信息直说「攻略库里没有，建议出行前自行核实」，禁止编造店名/价格/时刻。用中文简洁回答。' },
-    { role: 'user', content: `问题：${q}\n\n攻略库检索条目：\n${ctxText}\n\n已收录景点备注：\n${pois}` },
-  ];
-  const r = await AI.chat(messages, { task: 'qa', temperature: 0.4 });
-  setAiOut((r.ok ? r.content : `❌ ${r.error}`)
-    + `\n\n—— 检索命中 ${ctx.length} 条攻略条目${AI.cfg.provider === 'demo' ? '（离线演示模式未调用大模型）' : ''}`);
+  if (!aiGuard() || !aiBegin()) return;
+  try {
+    const city = state.to.name;
+    const ctx = retrieveGuide(city, q);
+    const ctxText = ctx.map(i => `- [${i.cat}] ${i.t}：${i.d}（${i.src}）`).join('\n') || '（攻略库暂无该城市条目）';
+    const pois = (POIS[city] || []).map(p => `${p.name}（${tierLabel(p.tier)}；${p.note || ''}）`).join('；') || '（该城市暂无景点数据）';
+    openAiOut('🤖 目的地问答', '检索攻略库并生成回答…');
+    const messages = [
+      { role: 'system', content: '你是目的地攻略问答助手。只允许基于给定条目回答；引用条目时注明来源；条目里没有的信息直说「攻略库里没有，建议出行前自行核实」，禁止编造店名/价格/时刻。用中文简洁回答。' },
+      { role: 'user', content: `问题：${q}\n\n攻略库检索条目：\n${ctxText}\n\n已收录景点备注：\n${pois}` },
+    ];
+    const r = await AI.chat(messages, { task: 'qa', temperature: 0.4, maxTokens: 600 });
+    setAiOut((r.ok ? r.content : `❌ ${r.error}`)
+      + `\n\n—— 检索命中 ${ctx.length} 条攻略条目${AI.cfg.provider === 'demo' ? '（离线演示模式未调用大模型）' : ''}`);
+  } finally {
+    aiEnd();
+  }
 }
 
 /* ================= AI 功能（通道见 ai.js；LLM 只转述结构化事实） ================= */
@@ -2369,6 +2377,15 @@ function aiGuard() {
   toast('先在「AI 设置」里选一个通道（OpenRouter 有免费模型，或用离线演示）');
   return false;
 }
+
+// 防重复：AI 请求可能长达数十秒，连点会并发排队多个请求，输出框互相覆盖且更慢
+let aiBusy = false;
+function aiBegin() {
+  if (aiBusy) { toast('AI 正在处理上一个请求，请等它完成（或点 ✕ 关闭后重试）'); return false; }
+  aiBusy = true;
+  return true;
+}
+function aiEnd() { aiBusy = false; }
 
 function openAiSettings() {
   $('#aiProvider').innerHTML = Object.entries(AI_PROVIDERS)
@@ -2438,11 +2455,16 @@ async function saveCacheConfig() {
 }
 
 async function testAi() {
-  $('#aiStatus').textContent = '测试连通中…';
-  const r = await AI.chat([{ role: 'user', content: '收到请只回复：ok' }], { task: 'test', maxTokens: 8 });
-  $('#aiStatus').textContent = r.ok
-    ? `✅ 连通正常（${r.via === 'demo' ? '离线演示' : r.via === 'proxy' ? '本地代理' : '直连'}）`
-    : `❌ ${r.error}`;
+  if (!aiBegin()) return;
+  try {
+    $('#aiStatus').textContent = '测试连通中…';
+    const r = await AI.chat([{ role: 'user', content: '收到请只回复：ok' }], { task: 'test', maxTokens: 8, timeoutMs: 20000 });
+    $('#aiStatus').textContent = r.ok
+      ? `✅ 连通正常（${r.via === 'demo' ? '离线演示' : r.via === 'proxy' ? '本地代理' : '直连'}）`
+      : `❌ ${r.error}`;
+  } finally {
+    aiEnd();
+  }
 }
 
 function openAiOut(title, body) {
@@ -2502,16 +2524,20 @@ function buildPlanJSON() { // 只打包结构化事实给 LLM，遵守"表达层
 }
 
 async function aiExplain() {
-  if (!aiGuard()) return;
-  if (!getOrder().flat().length) return toast('请先生成行程方案');
-  openAiOut('🤖 AI 行程讲解', '基于结构化行程生成讲解…');
-  const messages = [
-    { role: 'system', content: '你是行程讲解助手，用户给你一份结构化行程 JSON。硬性规则：只允许转述 JSON 里出现过的地点、时刻、金额、交通方式，禁止新增任何地点/车次/时刻/价格；用中文；先总述（天数/城际/总花费），再逐天讲为什么这样排（只能引用 JSON 里的 note 与顺序关系），最后给 2-3 条贴士（只能来自 note 字段）。' },
-    { role: 'user', content: JSON.stringify(buildPlanJSON()) },
-  ];
-  const r = await AI.chat(messages, { task: 'explain', temperature: 0.4 });
-  setAiOut((r.ok ? r.content : `❌ ${r.error}`)
-    + (AI.cfg.provider === 'demo' ? '\n\n（离线演示模式：内容由页面内结构化数据汇总生成，未调用大模型）' : ''));
+  if (!aiGuard() || !aiBegin()) return;
+  try {
+    if (!getOrder().flat().length) return toast('请先生成行程方案');
+    openAiOut('🤖 AI 行程讲解', '基于结构化行程生成讲解…');
+    const messages = [
+      { role: 'system', content: '你是行程讲解助手，用户给你一份结构化行程 JSON。硬性规则：只允许转述 JSON 里出现过的地点、时刻、金额、交通方式，禁止新增任何地点/车次/时刻/价格；用中文；先总述（天数/城际/总花费），再逐天讲为什么这样排（只能引用 JSON 里的 note 与顺序关系），最后给 2-3 条贴士（只能来自 note 字段）。' },
+      { role: 'user', content: JSON.stringify(buildPlanJSON()) },
+    ];
+    const r = await AI.chat(messages, { task: 'explain', temperature: 0.4, maxTokens: 800 });
+    setAiOut((r.ok ? r.content : `❌ ${r.error}`)
+      + (AI.cfg.provider === 'demo' ? '\n\n（离线演示模式：内容由页面内结构化数据汇总生成，未调用大模型）' : ''));
+  } finally {
+    aiEnd();
+  }
 }
 
 /* --- 一句话生成行程 --- */
@@ -2525,27 +2551,31 @@ function nlParseLocal(text) { // 离线兜底：只识别「城市 + N 天」
 async function aiNLPlan() {
   const text = $('#nlInput').value.trim();
   if (!text) return toast('先描述需求，例：下周去成都玩 3 天，预算 3000');
-  if (!aiGuard()) return;
-  let slots = null;
-  if (AI.cfg.provider === 'demo') {
-    slots = nlParseLocal(text);
-    if (!slots) {
-      openAiOut('✨ 一句话规划', '离线模式只支持「城市 + 天数」格式（例：成都 3 天）。配置 AI 通道后可解析任意描述。');
-      return;
+  if (!aiGuard() || !aiBegin()) return;
+  try {
+    let slots = null;
+    if (AI.cfg.provider === 'demo') {
+      slots = nlParseLocal(text);
+      if (!slots) {
+        openAiOut('✨ 一句话规划', '离线模式只支持「城市 + 天数」格式（例：成都 3 天）。配置 AI 通道后可解析任意描述。');
+        return;
+      }
+    } else {
+      openAiOut('✨ 一句话规划', '解析需求中…');
+      const today = fmtISO(new Date());
+      const messages = [
+        { role: 'system', content: `把用户的一句旅行需求解析成 JSON，字段：city（中国地级市名，不带"市"后缀）、days（整数）、start_date（YYYY-MM-DD；今天是 ${today}，"下周/明天"等相对日期据此推算，无法确定则 null）、party（同行人描述或 null）、budget（每人预算数字或 null）、interests（兴趣标签数组，可为空数组）。只输出 JSON。` },
+        { role: 'user', content: text },
+      ];
+      const r = await AI.chat(messages, { task: 'nlplan', temperature: 0.1, maxTokens: 300 });
+      if (!r.ok) return setAiOut(`❌ ${r.error}`);
+      slots = AI.extractJSON(r.content);
+      if (!slots) return setAiOut('没能从回复里解析出 JSON，原始回复：\n' + r.content.slice(0, 500));
     }
-  } else {
-    openAiOut('✨ 一句话规划', '解析需求中…');
-    const today = fmtISO(new Date());
-    const messages = [
-      { role: 'system', content: `把用户的一句旅行需求解析成 JSON，字段：city（中国地级市名，不带"市"后缀）、days（整数）、start_date（YYYY-MM-DD；今天是 ${today}，"下周/明天"等相对日期据此推算，无法确定则 null）、party（同行人描述或 null）、budget（每人预算数字或 null）、interests（兴趣标签数组，可为空数组）。只输出 JSON。` },
-      { role: 'user', content: text },
-    ];
-    const r = await AI.chat(messages, { task: 'nlplan', temperature: 0.1, maxTokens: 300 });
-    if (!r.ok) return setAiOut(`❌ ${r.error}`);
-    slots = AI.extractJSON(r.content);
-    if (!slots) return setAiOut('没能从回复里解析出 JSON，原始回复：\n' + r.content.slice(0, 500));
+    applySlots(slots, text);
+  } finally {
+    aiEnd();
   }
-  applySlots(slots, text);
 }
 
 function applySlots(slots, rawText) {
