@@ -86,9 +86,12 @@ const state = {
   transport: null,
   intercity: null,
   selected: [],
-  orders: {},        // {recommended:[[dayIds]], popular:[[..]], custom:[[..]]}
+  orders: {},        // {recommended:[[dayIds]], popular:[[..]], custom:[[..]], ai:[[..]]}
   scheme: 'recommended',
   modes: [],         // 所有天的通勤方式，扁平数组
+  modeManual: {},    // 手动指定过的路段下标；自动刷新不覆盖
+  aiPlan: null,      // {days, reasons, sig, model, moved, dropped}；AI 编排结果
+  aiBusy: false,     // AI 编排请求中
   withTicket: true,
   step: 1,
   maxStep: 1,
@@ -161,6 +164,117 @@ async function osrmRoute(a, b) { // 免 key、支持浏览器跨域；失败回�
   }
 }
 
+/* --- 免费步行 / 骑行路网：判断这一段到底走不走得过去 -------------------------
+ * 没有百度 / 高德 key 时，仍然需要一个「真实路网」来校验交通方式：
+ *  - FOSSGIS 的 foot / bike profile 在跨海、跨江无桥、隧道禁止行人时会返回 NoRoute；
+ *  - 路线里出现 ferry 步骤，说明需要坐船，也不能标成「步行 / 骑行」；
+ *  - 结果按点对缓存，检查过的路段不重复请求。
+ * 有地图 key 时仍优先用百度 / 高德，这里的免费路网只做兜底与合理性校验。 */
+const FREE_ROUTE = {
+  foot: 'https://routing.openstreetmap.de/routed-foot/route/v1/foot',
+  bike: 'https://routing.openstreetmap.de/routed-bike/route/v1/bike',
+  drive: 'https://router.project-osrm.org/route/v1/driving',
+};
+const FREE_PROFILE_OF = { walking: 'foot', riding: 'bike', driving: 'drive' };
+const freeRouteCache = new Map();   // `${profile}|${pairKey}` -> Promise<result>
+const feasCache = new Map();        // pairKey -> {walk?, bike?}
+const feasInflight = new Map();     // pairKey -> Promise
+
+function freeRoute(a, b, profile = 'drive') {
+  const base = FREE_ROUTE[profile] || FREE_ROUTE.drive;
+  const key = `${profile}|${pairKey(a, b)}`;
+  if (freeRouteCache.has(key)) return freeRouteCache.get(key);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 7000);
+  const url = `${base}/${a.lng},${a.lat};${b.lng},${b.lat}`
+    + '?overview=full&geometries=geojson&steps=true&alternatives=false';
+  const p = fetch(url, { signal: ctrl.signal })
+    .then(r => r.json())
+    .then(data => {
+      if (!data || data.code !== 'Ok' || !data.routes || !data.routes[0]) {
+        return { ok: false, profile, reason: data && data.code === 'NoRoute' ? 'no-route' : ((data && data.code) || 'bad-response') };
+      }
+      const route = data.routes[0];
+      const steps = (route.legs || []).flatMap(l => l.steps || []);
+      return {
+        ok: true, profile,
+        km: route.distance / 1000,
+        min: route.duration / 60,
+        path: (route.geometry && route.geometry.coordinates) || [],
+        crs: 'wgs',   // OSRM 折线是 WGS-84，叠到 GCJ 底图前要转换
+        ferry: steps.some(s => s.mode === 'ferry'),
+        segments: steps
+          .filter(s => s.mode === 'ferry')
+          .map(s => ({ mode: 'transit', name: s.name || '轮渡', km: (s.distance || 0) / 1000, stops: 0 })),
+        provider: 'OSRM 免费路网',
+      };
+    })
+    .catch(() => ({ ok: false, profile, reason: 'network' }))
+    .finally(() => {
+      clearTimeout(timer);
+      // 网络错误不缓存，下次重绘还能重试；NoRoute 是确定结论，缓存下来
+      if (freeRouteCache.get(key) === p) {
+        freeRouteCache.get(key).then(res => { if (res && !res.ok && res.reason === 'network') freeRouteCache.delete(key); });
+      }
+    });
+  freeRouteCache.set(key, p);
+  return p;
+}
+
+// 只对「可能步行 / 骑行」的短路段取免费路线，避免把配额浪费在明显要打车的长段上
+function ensurePairFeas(a, b) {
+  const key = pairKey(a, b);
+  if (feasCache.has(key)) return Promise.resolve(feasCache.get(key));
+  if (feasInflight.has(key)) return feasInflight.get(key);
+  const km0 = roadKm(a, b);
+  const jobs = [];
+  if (km0 <= 5) jobs.push(['walk', 'foot']);
+  if (km0 <= 12) jobs.push(['bike', 'bike']);
+  if (!jobs.length) {
+    feasCache.set(key, {});
+    return Promise.resolve({});
+  }
+  const p = Promise.all(jobs.map(async ([slot, profile]) => [slot, await freeRoute(a, b, profile)]))
+    .then(pairs => {
+      const out = {};
+      pairs.forEach(([slot, res]) => { out[slot] = res; });
+      feasCache.set(key, out);
+      feasInflight.delete(key);
+      return out;
+    });
+  feasInflight.set(key, p);
+  return p;
+}
+function feasOf(a, b) { return feasCache.get(pairKey(a, b)) || null; }
+
+// 返回「不能走路 / 不能骑行」的原因；网络失败返回 null（不因为断网就否定步行）
+function walkBlocked(f) {
+  const r = f && f.walk;
+  if (!r) return null;
+  if (!r.ok) return r.reason === 'no-route' ? '无步行路线（可能需跨海 / 过隧道）' : null;
+  if (r.ferry) return '步行需坐轮渡，不能算作步行';
+  if (r.km > 6 || r.min > 120) return `步行路线约 ${r.km.toFixed(1)} km，不现实`;
+  return null;
+}
+function bikeBlocked(f) {
+  const r = f && f.bike;
+  if (!r) return null;
+  if (!r.ok) return r.reason === 'no-route' ? '无骑行路线（可能需跨海 / 过隧道）' : null;
+  if (r.ferry) return '骑行需坐轮渡，不能算作骑行';
+  if (r.km > 15 || r.min > 120) return `骑行路线约 ${r.km.toFixed(1)} km，不现实`;
+  return null;
+}
+function hasFerry(f) {
+  return !!(f && ((f.walk && f.walk.ok && f.walk.ferry) || (f.bike && f.bike.ok && f.bike.ferry)));
+}
+
+// 真实路网里程优先（OSRM / 百度），没有时退回直线 × 1.35
+function legKm(a, b) {
+  const est = routeEst.get(pairKey(a, b));
+  const km = est && est.taxi && est.taxi.km;
+  return km && km > 0 ? km : roadKm(a, b);
+}
+
 async function pairEstimate(cityName, a, b) { // 单对点估算：百度路网（需 AK）→ OSRM（免 key）→ 直线公式
   const km0 = roadKm(a, b);
   const est = {
@@ -218,7 +332,10 @@ async function ensureSpotNav() {
     p.navName = best.name;
     changed = true;
   }
-  if (changed) resetRoutes();
+  if (changed) {
+    invalidateAIPlan();  // 景点坐标换成真实出入口后，旧的 AI 编排基于旧坐标
+    resetRoutes();
+  }
   return changed;
 }
 
@@ -306,11 +423,16 @@ async function ensureRoutes() { // 批量拉真实路网，回来后按当前步
   if (!pairs.size) return;
   const seqId = ++routesSeq;
   const results = await Promise.all(
-    [...pairs.entries()].map(async ([key, [a, b]]) =>
-      [key, state.transport ? await pairEstimate(state.to.name, a, b) : null]),
+    [...pairs.entries()].map(async ([key, [a, b]]) => {
+      const est = state.transport ? await pairEstimate(state.to.name, a, b) : null;
+      // 同一轮把步行 / 骑行可达性也查掉：跨海、隧道禁行在首屏就能被识别
+      await ensurePairFeas(a, b);
+      return [key, est];
+    }),
   );
   if (seqId !== routesSeq) return;
   results.forEach(([key, est]) => { if (est) routeEst.set(key, est); });
+  refreshAutoModes();
   rebuildAccess();
   if (state.step === 2) renderTransport();
   if (state.step >= 4) { renderTimeline(); drawRoute(false); }
@@ -324,8 +446,25 @@ function realLegCost(modeId, geo) {
 }
 
 function legOptsFor(km, a, b) {
-  const opts = legOpts(km);
+  // 用真实路网里程选方式：跨海绕行的 0.8 km 直线距离可能对应 20 km 车程，
+  // 若继续按直线距离算，就会给出「步行 / 骑行」这种不可行的建议。
+  let opts = legOpts(a && b ? legKm(a, b) : km);
   if (a && b) {
+    // 免费 foot / bike 路网已经明确说走不过去（跨海、隧道禁行、需轮渡）时，
+    // 直接不给步行 / 骑行选项；断网（network）不在此列，避免误伤。
+    const f = feasOf(a, b);
+    const walkWhy = walkBlocked(f), bikeWhy = bikeBlocked(f);
+    if (walkWhy || bikeWhy) {
+      opts = opts.filter(o => !(o.id === 'walk' && walkWhy) && !(o.id === 'bike' && bikeWhy));
+      opts.forEach(o => {
+        if (o.id === 'walk' && walkWhy) o.why = walkWhy;
+        if (o.id === 'bike' && bikeWhy) o.why = bikeWhy;
+      });
+    }
+    if (hasFerry(f)) {
+      const tr = opts.find(o => o.id === 'transit');
+      if (tr) { tr.name = '公交 / 轮渡'; tr.ferry = true; }
+    }
     const e = routeEst.get(pairKey(a, b));
     if (e) {
       const taxi = opts.find(o => o.id === 'taxi');
@@ -367,11 +506,12 @@ function fastestCandidates(km0) {
 async function applyFastestModes(btn) {
   if (!state.modes.length) return;
   if (!MAPS.available()) {
-    toast('未配置百度服务器端 AK，先按距离智能估算');
+    toast('未配置地图 key，按真实路网里程与步行/骑行可达性估算');
     state.modes = state.modes.map((_, i) => {
       const ep = legEndpoints(i);
-      return ep ? smartMode(roadKm(ep[0], ep[1])) : state.modes[i];
+      return ep ? smartModeFor(ep[0], ep[1]) : state.modes[i];
     });
+    state.modeManual = Object.fromEntries(state.modes.map((_, i) => [i, true]));
     renderTimeline();
     drawRoute(false);
     return;
@@ -402,10 +542,11 @@ async function applyFastestModes(btn) {
       showRouteLoading('正在对比最快组合', i + 1, total);
     }
     if (token !== fastestToken) return;
+    state.modeManual = Object.fromEntries(state.modes.map((_, i) => [i, true]));
     renderTimeline();
     drawRoute(false);
     finished = true;
-    toast('已按百度实时时长选出每段最快方式');
+    toast('已按实时路网选出每段最快方式（跨海段会自动排除步行/骑行）');
   } finally {
     if (btn && +btn.dataset.fastestRun === token) {
       btn.disabled = false;
@@ -858,6 +999,24 @@ function legOpts(km) {
 const smartMode = km => km <= 1.2 ? 'walk' : km <= 4.5 ? 'bike' : km <= 15 ? 'transit' : 'taxi';
 const legFastMin = km => legOpts(km)[legOpts(km).length - 1].min; // 最快方式（打车）分钟数
 
+// 自动选方式：优先用真实路网里程，并遵守免费路网的「走不过去」结论。
+// 例如厦门中山路 → 鼓浪屿：直线 1.8 km，但 foot / bike 都 NoRoute，
+// 这里就会直接落到公交 / 轮渡，而不是给出 25 分钟步行跨海。
+function smartModeFor(a, b) {
+  const km = legKm(a, b);
+  const f = feasOf(a, b);
+  if (hasFerry(f)) return 'transit';
+  const walkWhy = walkBlocked(f), bikeWhy = bikeBlocked(f);
+  // 有真实步行 / 骑行路线时，用路线自身的里程和时长判断是否现实
+  const walk = f && f.walk && f.walk.ok && !f.walk.ferry ? f.walk : null;
+  const bike = f && f.bike && f.bike.ok && !f.bike.ferry ? f.bike : null;
+  const walkFine = !walkWhy && (!walk || (walk.km <= 2.5 && walk.min <= 90));
+  const bikeFine = !bikeWhy && (!bike || (bike.km <= 8 && bike.min <= 90));
+  if (walkFine && km <= 1.2) return 'walk';
+  if (bikeFine && km <= 4.5) return 'bike';
+  return km <= 15 ? 'transit' : 'taxi';
+}
+
 /* ================= 排序算法 ================= */
 
 function routeCost(start, order, closed) {
@@ -1046,13 +1205,34 @@ function initModes() {
   resetFastestButton();
   const hub = hubOf(state.to);
   state.modes = [];
+  state.modeManual = {};  // 用户手动改过的路段；自动刷新时不动这些段
   getOrder().forEach(dayIds => {
     if (!dayIds.length) return; // 空天（自由活动）不占路段
     const seq = [hub, ...dayIds.map(id => POIMAP[id]), hub];
     for (let k = 1; k < seq.length; k++) {
-      state.modes.push(smartMode(roadKm(seq[k - 1], seq[k])));
+      state.modes.push(smartModeFor(seq[k - 1], seq[k]));
     }
   });
+}
+
+// 路网 / 步行可达性晚于首屏到达：把仍是「自动」的路段按新数据升级一次，
+// 用户手动点过的方式（modeManual）保持不变。
+function refreshAutoModes() {
+  if (!state.modes.length) return false;
+  const hub = hubOf(state.to);
+  let legIdx = 0, changed = false;
+  getOrder().forEach(dayIds => {
+    if (!dayIds.length) return;
+    const seq = [hub, ...dayIds.map(id => POIMAP[id]), hub];
+    for (let k = 1; k < seq.length; k++) {
+      if (!state.modeManual[legIdx]) {
+        const want = smartModeFor(seq[k - 1], seq[k]);
+        if (want !== state.modes[legIdx]) { state.modes[legIdx] = want; changed = true; }
+      }
+      legIdx++;
+    }
+  });
+  return changed;
 }
 
 function computeTotals() {
@@ -1098,7 +1278,9 @@ function schemeMetaText() {
   const n = getOrder().flat().length;
   const alg = state.scheme === 'recommended'
     ? `地理聚类分 ${state.days.length} 天 + 每天最优排序${n <= 8 ? '（全排列枚举）' : '（贪心 + 2-opt）'}`
-    : state.scheme === 'popular' ? '按「人气 ÷ 就近」排链路后按时间窗切段' : '手动调整：当天内 ↑↓ 排序，⇤⇥ 跨天挪动';
+    : state.scheme === 'popular' ? '按「人气 ÷ 就近」排链路后按时间窗切段'
+      : state.scheme === 'ai' ? `AI 按地理关系与时间窗分 ${state.days.length} 天（${(state.aiPlan && state.aiPlan.model) || '大模型'}）`
+        : '手动调整：当天内 ↑↓ 排序，⇤⇥ 跨天挪动';
   return `${alg} · 市内通勤 ${fmtDur(t.moveMin)} / ${fmtKm(t.km)} · 游玩 ${fmtDur(t.playMin)}`;
 }
 
@@ -1281,6 +1463,9 @@ function renderTimeline() {
       + (pd.warn ? `<span class="d-warn">⚠ 超出时间窗约 ${fmtDur(pd.warn)}</span>` : '')
       + `</div>`
       + `<div class="day-body">`;
+    if (state.scheme === 'ai' && state.aiPlan && state.aiPlan.reasons[di]) {
+      h += `<div class="ai-why">✨ ${esc(state.aiPlan.reasons[di])}</div>`;
+    }
     if (!dayIds.length) {
       h += `<div class="t-rest">🌿 这一天自由活动，可在「自定义安排」里把景点挪过来</div></div></div>`;
       return;
@@ -1288,9 +1473,14 @@ function renderTimeline() {
     const seq = [hub, ...dayIds.map(id => POIMAP[id]), hub];
     seq.forEach((p, k) => {
       if (k > 0) {
-        const km = roadKm(seq[k - 1], p);
+        const km = legKm(seq[k - 1], p);  // 有真实路网里程时显示真实里程
         const opts = legOptsFor(km, seq[k - 1], p);
-        const chosenMode = state.modes[legIdx];
+        // 路段因跨海等原因不再提供步行/骑行时，自动落到可行的方式上
+        let chosenMode = state.modes[legIdx];
+        if (!opts.some(o => o.id === chosenMode)) {
+          chosenMode = (opts[opts.length - 1] || {}).id || 'taxi';
+          state.modes[legIdx] = chosenMode;
+        }
         const comp = compositionHTML(routeGeo.get(geoKeyOf(seq[k - 1], p, chosenMode)));
         h += `<div class="tleg"><div class="lbl">第 ${di + 1} 天 · 段 ${k} · 约 ${fmtKm(km)}</div><div class="modes">`
           + opts.map(o => `<button class="chip c-${o.id}${chosenMode === o.id ? ' on' : ''}" data-leg="${legIdx}" data-mode="${o.id}">`
@@ -1487,6 +1677,7 @@ function updateSelInfo() {
 function toggleSpot(id) {
   const i = state.selected.indexOf(id);
   if (i >= 0) state.selected.splice(i, 1); else state.selected.push(id);
+  invalidateAIPlan();  // 景点集合变了，旧的 AI 分天结果作废
   renderSpots();
   refreshSpotMarkers();
 }
@@ -1494,6 +1685,7 @@ function toggleSpot(id) {
 /* ================= 地图 ================= */
 
 let map = null, gInter, gSpots, gRoute;
+let mapFull = false;  // 地图全屏（手机端主要靠它放大操作区域）
 const MODE_STYLE = {
   // 线宽 + 虚线段 + 路段中点圆标：三种线索叠加，避免只靠虚线区分
   // （百度 GL / 高德 JS API 只认 solid/dashed，自定义虚线样式在它们上面会退化成同一种）
@@ -1526,6 +1718,81 @@ function compositionHTML(geo, cls) {
   return `<span class="${cls || 'tleg-detail'}">` + segs.map((s, i) =>
     (i ? '<span class="seg-arrow">→</span>' : '')
     + `<span class="seg ${s.mode === 'transit' ? 'transit' : 'walk'}">${segLabel(s)}</span>`).join('') + '</span>';
+}
+
+/* ================= 坐标系转换 =================
+ * 页面内部（城市、景点、酒店、百度/高德路线）统一使用 GCJ-02。
+ * Leaflet 底图有两种坐标系：
+ *  - 高德栅格瓦片：GCJ-02，直接绘制；
+ *  - OSM 瓦片：WGS-84，国内直接叠加 GCJ-02 会偏移几百米，绘制前需反算；
+ *  - OSRM 免费路网返回的折线是 WGS-84，叠到高德瓦片时要正向转换。
+ * 百度 JS API 仍按 GCJ-02 → BD-09 的既有转换显示。 */
+const DATA_CRS = 'gcj';
+let leafCrs = DATA_CRS;   // 当前 Leaflet 底图坐标系：gcj（高德瓦片）/ wgs（OSM 瓦片）
+
+function outOfChina(lng, lat) {
+  return !(lng >= 72.004 && lng <= 137.8347 && lat >= 0.8293 && lat <= 55.8271);
+}
+function _gcjDLat(x, y) {
+  let ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x));
+  ret += (20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0 / 3.0;
+  ret += (20.0 * Math.sin(y * Math.PI) + 40.0 * Math.sin(y / 3.0 * Math.PI)) * 2.0 / 3.0;
+  ret += (160.0 * Math.sin(y / 12.0 * Math.PI) + 320.0 * Math.sin(y * Math.PI / 30.0)) * 2.0 / 3.0;
+  return ret;
+}
+function _gcjDLng(x, y) {
+  let ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
+  ret += (20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0 / 3.0;
+  ret += (20.0 * Math.sin(x * Math.PI) + 40.0 * Math.sin(x / 3.0 * Math.PI)) * 2.0 / 3.0;
+  ret += (150.0 * Math.sin(x / 12.0 * Math.PI) + 300.0 * Math.sin(x / 30.0 * Math.PI)) * 2.0 / 3.0;
+  return ret;
+}
+function wgs2gcj(lng, lat) {
+  if (outOfChina(lng, lat)) return [lng, lat];
+  let dlat = _gcjDLat(lng - 105.0, lat - 35.0);
+  let dlng = _gcjDLng(lng - 105.0, lat - 35.0);
+  const radlat = lat / 180.0 * Math.PI;
+  const magic = 1 - 0.00669342162296594323 * Math.sin(radlat) ** 2;
+  const sqrtmagic = Math.sqrt(magic);
+  dlat = (dlat * 180.0) / ((6378245.0 * (1 - 0.00669342162296594323)) / (magic * sqrtmagic) * Math.PI);
+  dlng = (dlng * 180.0) / (6378245.0 / sqrtmagic * Math.cos(radlat) * Math.PI);
+  return [lng + dlng, lat + dlat];
+}
+// GCJ-02 → WGS-84：用正变换迭代逼近，误差 < 0.5m
+function gcj2wgs(lng, lat) {
+  if (outOfChina(lng, lat)) return [lng, lat];
+  let wlng = lng, wlat = lat;
+  for (let i = 0; i < 3; i++) {
+    const [glng, glat] = wgs2gcj(wlng, wlat);
+    wlng -= glng - lng;
+    wlat -= glat - lat;
+  }
+  return [wlng, wlat];
+}
+function convertLngLat(lng, lat, from, to) {
+  if (!from || !to || from === to) return [lng, lat];
+  if (from === 'gcj' && to === 'wgs') return gcj2wgs(lng, lat);
+  if (from === 'wgs' && to === 'gcj') return wgs2gcj(lng, lat);
+  return [lng, lat];
+}
+// 统一转成页面数据坐标系（GCJ-02），供百度 / 高德 JS API 使用
+function toGcjPt(pt, src = DATA_CRS) {
+  const [lng, lat] = convertLngLat(pt.lng, pt.lat, src, 'gcj');
+  return { lng, lat };
+}
+function toGcjPath(pts, src = DATA_CRS) {
+  return pts.map(([lng, lat]) => convertLngLat(lng, lat, src, 'gcj'));
+}
+// 转成当前 Leaflet 底图坐标系，返回 [lat, lng]
+function displayLL(pt, src = DATA_CRS) {
+  const [lng, lat] = convertLngLat(pt.lng, pt.lat, src, leafCrs);
+  return [lat, lng];
+}
+function displayPath(pts, src = DATA_CRS) {
+  return pts.map(([lng, lat]) => {
+    const c = convertLngLat(lng, lat, src, leafCrs);
+    return [c[1], c[0]];
+  });
 }
 
 /* ================= 地图抽象层：Leaflet(OSM) / 百度 JS API GL 双后端 =================
@@ -1563,61 +1830,75 @@ const MAPAPI = {
   fit(pts) {
     if (!map || !pts.length) return;
     if (MAP_BACKEND === 'amap') {
-      const lngs = pts.map(p => p.lng), lats = pts.map(p => p.lat);
+      const cs = pts.map(p => toGcjPt(p, p.crs || DATA_CRS));
+      const lngs = cs.map(p => p.lng), lats = cs.map(p => p.lat);
       map.setBounds(
         new AMap.Bounds([Math.min(...lngs), Math.min(...lats)],
                         [Math.max(...lngs), Math.max(...lats)]),
         false, [42, 42, 42, 42],
       );
     } else if (MAP_BACKEND === 'baidu') {
-      map.setViewport(pts.map(p => BAIDU.bd(p)), { margins: [42, 42, 42, 42] });
+      map.setViewport(pts.map(p => BAIDU.bd(toGcjPt(p, p.crs || DATA_CRS))), { margins: [42, 42, 42, 42] });
     } else {
-      map.fitBounds(L.latLngBounds(pts.map(p => [p.lat, p.lng])), { padding: [42, 42] });
+      map.fitBounds(L.latLngBounds(pts.map(p => displayLL(p, p.crs || DATA_CRS))), { padding: [42, 42] });
     }
   },
 
   clear(g) { g.clear(); },
 
+  // 容器尺寸变化（进入/退出全屏、切换手机步骤、横竖屏）后必须让地图后端重算尺寸
+  resize() {
+    if (!map) return;
+    try {
+      if (MAP_BACKEND === 'amap') map.resize();
+      else if (MAP_BACKEND === 'baidu') map.checkResize();
+      else if (map.invalidateSize) map.invalidateSize();
+    } catch (e) { /* 后端尚未完全就绪时忽略 */ }
+  },
+
   // 两点连线（含弹窗）
   line(g, a, b, { color, weight = 4, dash = null, opacity = 0.85, popup }) {
     if (MAP_BACKEND === 'amap') {
+      const ca = toGcjPt(a, a.crs || DATA_CRS), cb = toGcjPt(b, b.crs || DATA_CRS);
       const pl = new AMap.Polyline({
-        path: [[a.lng, a.lat], [b.lng, b.lat]],
+        path: [[ca.lng, ca.lat], [cb.lng, cb.lat]],
         strokeColor: color, strokeWeight: weight, strokeOpacity: opacity,
         strokeStyle: dash ? 'dashed' : 'solid', lineJoin: 'round',
       });
       if (popup) pl.on('click', () => {
         new AMap.InfoWindow({ content: popup, offset: new AMap.Pixel(0, -10) })
-          .open(map, [a.lng, a.lat]);
+          .open(map, [ca.lng, ca.lat]);
       });
       map.add(pl); g.push(pl);
     } else if (MAP_BACKEND === 'baidu') {
-      const pl = new BMapGL.Polyline([BAIDU.bd(a), BAIDU.bd(b)], {
+      const ca = toGcjPt(a, a.crs || DATA_CRS), cb = toGcjPt(b, b.crs || DATA_CRS);
+      const pl = new BMapGL.Polyline([BAIDU.bd(ca), BAIDU.bd(cb)], {
         strokeColor: color, strokeWeight: weight, strokeOpacity: opacity,
         strokeStyle: dash ? 'dashed' : 'solid',
       });
       if (popup) pl.addEventListener('click', () => {
-        map.openInfoWindow(new BMapGL.InfoWindow(popup, { width: 260 }), BAIDU.bd(a));
+        map.openInfoWindow(new BMapGL.InfoWindow(popup, { width: 260 }), BAIDU.bd(ca));
       });
       map.addOverlay(pl); g.push(pl);
     } else {
-      const pl = L.polyline([[a.lat, a.lng], [b.lat, b.lng]],
+      const pl = L.polyline([displayLL(a, a.crs || DATA_CRS), displayLL(b, b.crs || DATA_CRS)],
         { color, weight, opacity, dashArray: dash || null })
         .bindPopup(popup || '').addTo(g);
     }
   },
 
-  // 实际道路折线：pts 为 [[lng,lat],...]（GCJ-02），直接来自百度 direction/api
-  path(g, pts, { color, weight = 4, dash = null, opacity = 0.9, popup } = {}) {
+  // 实际道路折线：pts 为 [[lng,lat],...]；crs 标明来源坐标系（百度/高德 gcj，OSRM wgs）
+  path(g, pts, { color, weight = 4, dash = null, opacity = 0.9, popup, crs = DATA_CRS } = {}) {
     if (!pts || pts.length < 2) return;
     if (MAP_BACKEND === 'amap') {
+      const gp = toGcjPath(pts, crs);
       const pl = new AMap.Polyline({
-        path: pts.map(([lng, lat]) => [lng, lat]),
+        path: gp,
         strokeColor: color, strokeWeight: weight, strokeOpacity: opacity,
         strokeStyle: dash ? 'dashed' : 'solid', lineJoin: 'round',
       });
       if (popup) pl.on('click', () => {
-        const mid = pts[Math.floor(pts.length / 2)];
+        const mid = gp[Math.floor(gp.length / 2)];
         new AMap.InfoWindow({ content: popup, offset: new AMap.Pixel(0, -10) })
           .open(map, [mid[0], mid[1]]);
       });
@@ -1625,18 +1906,19 @@ const MAPAPI = {
       return;
     }
     if (MAP_BACKEND === 'baidu') {
-      const line = new BMapGL.Polyline(pts.map(([lng, lat]) => BAIDU.bd({ lng, lat })), {
+      const gp = toGcjPath(pts, crs);
+      const line = new BMapGL.Polyline(gp.map(([lng, lat]) => BAIDU.bd({ lng, lat })), {
         strokeColor: color, strokeWeight: weight, strokeOpacity: opacity,
         strokeStyle: dash ? 'dashed' : 'solid',
       });
       if (popup) line.addEventListener('click', () => {
-        const mid = pts[Math.floor(pts.length / 2)];
+        const mid = gp[Math.floor(gp.length / 2)];
         map.openInfoWindow(new BMapGL.InfoWindow(popup, { width: 260 }),
           BAIDU.bd({ lng: mid[0], lat: mid[1] }));
       });
       map.addOverlay(line); g.push(line);
     } else {
-      const pl = L.polyline(pts.map(([lng, lat]) => [lat, lng]),
+      const pl = L.polyline(displayPath(pts, crs),
         { color, weight, opacity, dashArray: dash || null })
         .bindPopup(popup || '').addTo(g);
       pl._routePath = pts;
@@ -1646,30 +1928,32 @@ const MAPAPI = {
   // HTML 图钉（复用 .pin 样式）
   pin(g, pt, { html, w, h, popup, z = 0 }) {
     if (MAP_BACKEND === 'amap') {
+      const c = toGcjPt(pt, pt.crs || DATA_CRS);
       const mk = new AMap.Marker({
-        position: [pt.lng, pt.lat], content: html, anchor: 'top-left',
+        position: [c.lng, c.lat], content: html, anchor: 'top-left',
         offset: new AMap.Pixel(-w / 2, -h / 2), zIndex: 500 + z,
       });
       if (popup) mk.on('click', () => {
         new AMap.InfoWindow({ content: popup, offset: new AMap.Pixel(0, -10) })
-          .open(map, [pt.lng, pt.lat]);
+          .open(map, [c.lng, c.lat]);
       });
       map.add(mk); g.push(mk);
     } else if (MAP_BACKEND === 'baidu') {
-      const label = new BMapGL.Label(html, { position: BAIDU.bd(pt), offset: new BMapGL.Size(-w / 2, -h / 2) });
+      const c = toGcjPt(pt, pt.crs || DATA_CRS);
+      const label = new BMapGL.Label(html, { position: BAIDU.bd(c), offset: new BMapGL.Size(-w / 2, -h / 2) });
       if (label.domElement) {
         label.domElement.style.background = 'none';
         label.domElement.style.border = 'none';
         label.domElement.style.zIndex = String(500 + z);
       }
-      const open = () => map.openInfoWindow(new BMapGL.InfoWindow(popup || '', { width: 260 }), BAIDU.bd(pt));
+      const open = () => map.openInfoWindow(new BMapGL.InfoWindow(popup || '', { width: 260 }), BAIDU.bd(c));
       if (popup) {
         label.addEventListener('click', open);
         if (label.domElement) label.domElement.style.cursor = 'pointer';
       }
       map.addOverlay(label); g.push(label);
     } else {
-      const mk = L.marker([pt.lat, pt.lng], {
+      const mk = L.marker(displayLL(pt, pt.crs || DATA_CRS), {
         icon: L.divIcon({ className: 'pin-wrap', html, iconSize: [w, h], iconAnchor: [w / 2, h / 2] }),
         zIndexOffset: z,
       }).addTo(g);
@@ -1681,29 +1965,31 @@ const MAPAPI = {
   dot(g, pt, { fill, px = 7, popup, onClick }) {
     let handle;
     if (MAP_BACKEND === 'amap') {
+      const c0 = toGcjPt(pt, pt.crs || DATA_CRS);
       const c = new AMap.CircleMarker({
-        center: [pt.lng, pt.lat], radius: px,
+        center: [c0.lng, c0.lat], radius: px,
         strokeColor: '#fff', strokeWeight: 2, fillColor: fill, fillOpacity: 0.95, zIndex: 120,
       });
       if (popup) c.on('click', () => {
         new AMap.InfoWindow({ content: popup, offset: new AMap.Pixel(0, -10) })
-          .open(map, [pt.lng, pt.lat]);
+          .open(map, [c0.lng, c0.lat]);
       });
       if (onClick) c.on('click', onClick);
       map.add(c); g.push(c);
       handle = c;
     } else if (MAP_BACKEND === 'baidu') {
-      const c = new BMapGL.Circle(BAIDU.bd(pt), 130, {
+      const c0 = toGcjPt(pt, pt.crs || DATA_CRS);
+      const c = new BMapGL.Circle(BAIDU.bd(c0), 130, {
         strokeColor: '#fff', strokeWeight: 2, fillColor: fill, fillOpacity: 0.95,
       });
       if (popup) c.addEventListener('click', () => {
-        map.openInfoWindow(new BMapGL.InfoWindow(popup, { width: 260 }), BAIDU.bd(pt));
+        map.openInfoWindow(new BMapGL.InfoWindow(popup, { width: 260 }), BAIDU.bd(c0));
       });
       if (onClick) c.addEventListener('click', onClick);
       map.addOverlay(c); g.push(c);
       handle = c;
     } else {
-      const m = L.circleMarker([pt.lat, pt.lng], {
+      const m = L.circleMarker(displayLL(pt, pt.crs || DATA_CRS), {
         radius: px, color: '#fff', weight: 2, fillColor: fill, fillOpacity: 0.95,
       }).addTo(g);
       if (popup) m.bindPopup(popup);
@@ -1730,6 +2016,7 @@ const MAPAPI = {
     };
     // 用户在工具栏里显式选了高德：底图直接用高德栅格瓦片（GCJ-02，与页面坐标天然对齐）
     if (typeof MAPS !== 'undefined' && MAPS.provider === 'amap') {
+      leafCrs = 'gcj';
       L.tileLayer('/api/tiles/{z}/{x}/{y}.png', {
         maxZoom: 18, attribution: '© 高德地图',
       }).addTo(m);
@@ -1738,6 +2025,8 @@ const MAPAPI = {
     }
     // 默认：优先 OSM；连续失败（国内网络经常连不上 tile.openstreetmap.org）时
     // 自动切到高德栅格瓦片。
+    // OSM 底图是 WGS-84，而页面数据是 GCJ-02，绘制时必须先反算，否则国内会偏移几百米。
+    leafCrs = 'wgs';
     let tiles = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19, attribution: '© OpenStreetMap',
     }).addTo(m);
@@ -1750,6 +2039,9 @@ const MAPAPI = {
       tiles = L.tileLayer('/api/tiles/{z}/{x}/{y}.png', {
         maxZoom: 18, attribution: '© 高德地图',
       }).addTo(m);
+      leafCrs = 'gcj';
+      // 底图坐标系变了：清掉已画图层，按新坐标系重绘
+      MAPAPI._redrawLeafletOverlays();
     };
     tiles.on('tileload', () => { tileLoads++; });
     tiles.on('tileerror', () => { if (++tileErrs >= 4) useAmap(); });
@@ -1766,6 +2058,15 @@ const MAPAPI = {
     const mk = () => { const arr = []; arr.clear = () => arr.forEach(o => m.removeOverlay(o)); return arr; };
     map = m;
     return { inter: mk(), spots: mk(), route: mk() };
+  },
+
+  // 底图从 OSM(WGS-84) 切到高德(GCJ-02) 后，按新坐标系重绘已有图层
+  _redrawLeafletOverlays() {
+    if (!map || MAP_BACKEND !== 'leaflet' || !gInter || !gSpots || !gRoute) return;
+    gInter.clear(); gSpots.clear(); gRoute.clear();
+    Object.keys(spotMarkers).forEach(k => delete spotMarkers[k]);
+    if (state.step >= 4) drawRoute(false, true);
+    else if (state.step >= 2) { showIntercity(); showSpots(false); }
   },
 
   // 高德 JS API 2.0：与百度 GL 同为「整体替换」型后端，坐标直接用 GCJ-02
@@ -1806,6 +2107,23 @@ function waitMap(cb, tries = 80) {
 }
 
 function fitPts(pts) { MAPAPI.fit(pts); }
+
+/* 地图全屏：手机屏幕上把地图铺满整个视口，地图工具栏和图例仍保留；
+ * 退出用右上角按钮或 Esc。切到全屏 / 退出全屏后通知地图后端重算尺寸。 */
+function setMapFull(on) {
+  const card = document.querySelector('.mapcard');
+  if (!card) return;
+  mapFull = !!on;
+  card.classList.toggle('fullscreen', mapFull);
+  document.body.classList.toggle('map-full', mapFull);
+  const btn = $('#btnMapFull');
+  if (btn) {
+    btn.textContent = mapFull ? '⤢ 退出全屏' : '⛶ 全屏';
+    btn.title = mapFull ? '退出全屏' : '全屏查看地图，手机上更大更好操作';
+  }
+  setTimeout(() => MAPAPI.resize(), 90);
+}
+function toggleMapFull() { setMapFull(!mapFull); }
 
 function showIntercity() {
   if (!map) return;
@@ -1879,13 +2197,29 @@ function ensureGeo(a, b, modeId) {
   if (geoInFlight.has(key)) return geoInFlight.get(key);
   const epoch = geoToken;
   const mode = routeModeOf(modeId);
-  const p = MAPS.routeMode(a, b, mode, state.to.name, state.to.name)
-    .then(r => {
-      const good = r && r.path && r.path.length > 1 ? r : null;
-      if (epoch === geoToken) routeGeo.set(key, good);
-      return good;
-    })
-    .finally(() => geoInFlight.delete(key));
+  const p = (async () => {
+    let r = null;
+    try {
+      r = await MAPS.routeMode(a, b, mode, state.to.name, state.to.name);
+      if (r) r.crs = 'gcj';   // 百度 / 高德返回的折线已统一为 GCJ-02
+    } catch (e) { r = null; }
+    // 没配百度 / 高德 key 时，用免费 OSRM 路网补上步行 / 骑行 / 驾车折线。
+    // 公交地铁没有免费数据，保留直线示意，不做假路线。
+    const profile = FREE_PROFILE_OF[mode];
+    if ((!r || !r.path || r.path.length < 2) && profile) {
+      const fr = await freeRoute(a, b, profile);
+      if (fr.ok && fr.path && fr.path.length > 1) {
+        r = {
+          km: fr.km, min: fr.min, roadMin: fr.min, path: fr.path,
+          cost: null, segments: fr.segments, provider: fr.provider,
+          ferry: fr.ferry, mode, crs: fr.crs || 'wgs',
+        };
+      }
+    }
+    const good = r && r.path && r.path.length > 1 ? r : null;
+    if (epoch === geoToken) routeGeo.set(key, good);
+    return good;
+  })().finally(() => geoInFlight.delete(key));
   geoInFlight.set(key, p);
   return p;
 }
@@ -1893,7 +2227,8 @@ function ensureGeo(a, b, modeId) {
 // 逐段拉百度真实道路折线；每拿到一段就重绘（不清空已画好的部分）。
 // 2 QPS 的队列在 BAIDU.enqueue 里，服务端还有一道全局闸门，这里顺序请求即可。
 async function fetchLegGeometry(legs) {
-  if (!MAPS.available()) return false;
+  // 即使没配地图 key 也要取：免费 OSRM 路网能补步行 / 骑行 / 驾车折线，
+  // 公交地铁段拿不到就保留直线示意（不会假装有路线）。
   const run = ++geoSeq;
   let changed = false;
   for (const { a, b, modeId } of legs) {
@@ -1950,6 +2285,7 @@ function drawRoute(fit, skipFetch) {
       const km0 = roadKm(a, b);
       const opts = legOptsFor(km0, a, b);
       const chosen = opts.find(x => x.id === state.modes[legIdx]) || opts[opts.length - 1];
+      if (chosen && chosen.id !== state.modes[legIdx]) state.modes[legIdx] = chosen.id;
       const st = MODE_STYLE[chosen.id];
       const color = dayColor(di);  // 颜色表示第几天，线型表示交通方式
       const mode = routeModeOf(chosen.id);
@@ -1961,22 +2297,23 @@ function drawRoute(fit, skipFetch) {
       const min = real && geo.min ? geo.min : chosen.min;
       const cost = real && geo.cost != null ? geo.cost : chosen.cost;
       const url = baiduNav(a, b, mode);
-      const popup = `<b>第 ${di + 1} 天 段 ${k} · ${chosen.name}${real ? '（百度实际路线）' : ''}</b><br>约 ${fmtDur(min)} · ${fmtCost(cost)} · ${fmtKm(km)}`
+      const srcName = real ? `（${geo.provider || '实际路网'}${geo.ferry ? ' · 含轮渡' : ''}）` : '';
+      const popup = `<b>第 ${di + 1} 天 段 ${k} · ${chosen.name}${srcName}</b><br>约 ${fmtDur(min)} · ${fmtCost(cost)} · ${fmtKm(km)}`
         + (real ? compositionHTML(geo, 'tleg-detail') : '')
         + `<br><a class="pop-nav" target="_blank" rel="noopener" href="${url}">🧭 在百度地图打开该段导航</a>`;
       if (real) {
-        MAPAPI.path(gRoute, geo.path, { color, weight: st.w, dash: st.d, popup });
-        geo.path.forEach(([lng, lat]) => allPts.push({ lng, lat }));
+        MAPAPI.path(gRoute, geo.path, { color, weight: st.w, dash: st.d, popup, crs: geo.crs });
+        geo.path.forEach(([lng, lat]) => allPts.push({ lng, lat, crs: geo.crs }));
       } else {
-        // 详细折线未到之前先用直线兜底；取数失败 / 未配 AK 时明确标注是直线示意
-        const note = !MAPS.available()
-          ? '<br><i>未配置百度 AK，按直线示意</i>'
-          : tried ? '<br><i>未获取到详细路线，按直线示意</i>' : '<br><i>路线加载中…</i>';
+        // 详细折线未到之前先用直线兜底；取数失败 / 免费路网也没结果时明确标注是直线示意
+        const note = tried
+          ? '<br><i>未获取到详细路线，按直线示意</i>'
+          : '<br><i>路线加载中…</i>';
         MAPAPI.line(gRoute, a, b, { color, weight: Math.max(2.5, st.w - 1), dash: st.d || '4,8', popup: popup + note });
       }
       // 路段中点放一个方式圆标：三种地图后端都能显示，不依赖虚线样式
       const mid = real
-        ? { lng: geo.path[Math.floor(geo.path.length / 2)][0], lat: geo.path[Math.floor(geo.path.length / 2)][1] }
+        ? { lng: geo.path[Math.floor(geo.path.length / 2)][0], lat: geo.path[Math.floor(geo.path.length / 2)][1], crs: geo.crs }
         : { lng: (a.lng + b.lng) / 2, lat: (a.lat + b.lat) / 2 };
       badges.push({ pt: mid, html: `<div class="mode-badge ${st.cls}">${st.icon}</div>`, popup });
       legs.push({ a, b, modeId: chosen.id });
@@ -1996,7 +2333,7 @@ function drawRoute(fit, skipFetch) {
   if (fit) fitPts(allPts);
   // 详细路线还在取：地图先画直线兜底，并在右下角提示进度
   const pending = legs.filter(l => !routeGeo.has(geoKeyOf(l.a, l.b, l.modeId))).length;
-  if (MAPS.available() && pending) {
+  if (pending) {
     showRouteLoading('正在加载详细路线', legs.length - pending, legs.length);
   } else {
     hideRouteLoading();
@@ -2514,6 +2851,231 @@ async function aiExplain() {
     + (AI.cfg.provider === 'demo' ? '\n\n（离线演示模式：内容由页面内结构化数据汇总生成，未调用大模型）' : ''));
 }
 
+/* ================= AI 景点编排 =================
+ * 与步骤①「一句话规划」共用同一套 AI 通道（AI.chat → 本地代理或浏览器直连）。
+ * 职责边界：AI 只决定「哪天去哪些点、当天先后顺序」，时间、里程、交通方式
+ * 仍由本地引擎计算；AI 输出要过白名单校验，漏排的景点由本地补位，
+ * 排超时间窗的天会自动把景点挪到更空的一天。
+ */
+let aiPlanSeq = 0;  // 用户切走或重新编排后，丢弃在途 AI 结果
+
+const AI_PLAN_SYSTEM = [
+  '你是行程编排器，只负责把景点分配到每天并给出当天顺序，不要编造任何地点或 id。',
+  '硬性规则：',
+  '1. 只能使用用户 JSON 里 spots 出现过的 id；每个 id 只能用一次；禁止新增 id 或景点名。',
+  '2. 按地理位置就近分组，同一天不要安排明显跨江/跨海、需要绕行很远的地点。',
+  '3. 每天所有景点 play_min 之和，加上点间市内通勤时间，不要超过该天的 available_min；available_min 为 0 表示当天很晚才到，尽量不排景点。',
+  '4. 同一天顺序要顺路，减少折返；需要预约、建议游玩时间长的热门景点优先放当天靠前位置。',
+  '5. 景点排不下时宁可少排，也不要硬塞导致一天走不完。',
+  '只输出 JSON，不要解释文字：',
+  '{"days":[{"day":1,"spot_ids":["id1","id2"],"reason":"一句话说明分天和顺序的理由"}]}',
+].join('\n');
+
+function aiPlanSignature() {
+  const hub = hubOf(state.to);
+  return JSON.stringify({
+    city: state.to.name,
+    days: state.days,
+    hub: [hub.lng.toFixed(4), hub.lat.toFixed(4)],
+    spots: state.selected.slice().sort(),
+    transport: state.transport ? state.transport.id : null,
+    depart: state.departTime || '',
+    ret: state.returnTime || '',
+  });
+}
+
+function aiPlanPayload() {
+  const hub = hubOf(state.to), wins = dayWindows();
+  return {
+    city: state.to.name,
+    days: wins.map((w, i) => ({
+      day: i + 1, date: state.days[i], available_min: Math.max(0, Math.round(w.minutes)),
+    })),
+    hotel: { name: hub.name, lng: +hub.lng.toFixed(5), lat: +hub.lat.toFixed(5) },
+    spots: state.selected.map(id => {
+      const p = POIMAP[id];
+      return {
+        id: p.id, name: p.name,
+        lng: +p.lng.toFixed(5), lat: +p.lat.toFixed(5),
+        tier: tierLabel(p.tier), play_min: p.suggest_min,
+        ticket: p.ticket, note: p.note || '',
+      };
+    }),
+  };
+}
+
+function invalidateAIPlan() {
+  aiPlanSeq++;  // 作废在途请求
+  if (state.aiBusy) {
+    state.aiBusy = false;
+    updateSchemeTabsBusy(false);
+  }
+  if (!state.orders.ai && !state.aiPlan) { updateAIPlanBar(); return; }
+  state.orders.ai = null;
+  state.aiPlan = null;
+  if (state.scheme === 'ai') {
+    state.scheme = 'recommended';
+    $$('#schemeTabs button').forEach(b => b.classList.toggle('on', b.dataset.scheme === 'recommended'));
+  }
+  updateAIPlanBar();
+}
+
+function updateAIPlanBar() {
+  const bar = $('#aiPlanBar'), status = $('#aiPlanStatus');
+  if (!bar) return;
+  const show = state.aiBusy || (state.scheme === 'ai' && !!state.orders.ai);
+  bar.classList.toggle('hidden', !show);
+  if (!show || !status) return;
+  const p = state.aiPlan;
+  if (state.aiBusy) {
+    status.textContent = '✨ AI 正在编排景点与每天的先后顺序，请稍候…';
+  } else if (p) {
+    status.textContent = `✨ ${p.model || 'AI'} 编排完成`
+      + (p.dropped ? ` · 忽略 ${p.dropped} 个重复/无效项` : '')
+      + (p.moved ? ` · 自动平衡 ${p.moved} 个超出时间窗的景点` : '')
+      + '。每天可单独调整交通方式。';
+  }
+}
+
+function updateSchemeTabsBusy(busy) {
+  const tab = $('#schemeTabs button[data-scheme="ai"]');
+  if (tab) {
+    tab.disabled = busy;
+    tab.classList.toggle('busy', busy);
+    tab.textContent = busy ? '✨ 编排中…' : '✨ AI 编排';
+  }
+  const again = $('#btnAiReplan');
+  if (again) again.disabled = busy;
+}
+
+// 把 AI 输出收敛成合法方案：白名单 + 去重 + 漏排补位 + 每日容量平衡
+function normalizeAIPlan(raw) {
+  const D = state.days.length;
+  const valid = new Set(state.selected);
+  const nameToId = new Map(state.selected.map(id => [POIMAP[id].name, id]));
+  const resolveId = v => {
+    if (typeof v === 'string') return valid.has(v) ? v : (nameToId.get(v) || null);
+    if (v && typeof v === 'object') return resolveId(v.id || v.spot_id || v.name);
+    return null;
+  };
+  const days = Array.from({ length: D }, () => []);
+  const reasons = Array(D).fill('');
+  const seen = new Set();
+  let dropped = 0;
+  const rows = raw && (Array.isArray(raw.days) ? raw.days : (Array.isArray(raw) ? raw : null));
+  if (!rows) return null;
+  rows.forEach((row, idx) => {
+    if (!row || typeof row !== 'object') return;
+    const di = Math.max(0, Math.min(D - 1, (Number(row.day) || idx + 1) - 1));
+    if (typeof row.reason === 'string') reasons[di] = row.reason.slice(0, 180);
+    const ids = row.spot_ids || row.spots || row.ids || [];
+    (Array.isArray(ids) ? ids : []).forEach(item => {
+      const id = resolveId(item);
+      if (!id || seen.has(id)) { dropped++; return; }
+      seen.add(id);
+      days[di].push(id);
+    });
+  });
+  // 模型漏掉的景点：按本地推荐方案补到对应天，保证已选景点不会被悄悄丢掉
+  const missing = state.selected.filter(id => !seen.has(id));
+  if (missing.length) {
+    planRecommended(missing.map(id => POIMAP[id])).forEach((ids, di) => {
+      (ids || []).forEach(id => days[di].push(id));
+    });
+  }
+  const moved = rebalanceAIPlan(days);
+  return { days, reasons, dropped, moved };
+}
+
+// 某天排爆时，把当天最后一站挪到还有余量的最近一天；保留 AI 给出的组内顺序
+function rebalanceAIPlan(days) {
+  const wins = dayWindows(), hub = hubOf(state.to);
+  const load = ids => dayLoad(ids.map(id => POIMAP[id]), hub);
+  let moved = 0;
+  for (let guard = 0; guard < 80; guard++) {
+    let oi = -1, overflow = 0;
+    days.forEach((ids, i) => {
+      const over = load(ids) - wins[i].minutes;
+      if (over > overflow) { overflow = over; oi = i; }
+    });
+    if (oi < 0) break;
+    const from = days[oi];
+    let best = null;
+    for (let j = from.length - 1; j >= 0 && !best; j--) {
+      const spot = POIMAP[from[j]];
+      days.forEach((target, ti) => {
+        if (ti === oi || target.includes(from[j])) return;
+        if (load([...target, from[j]]) > wins[ti].minutes) return;
+        const anchor = target.length ? POIMAP[target[target.length - 1]] : hub;
+        const cost = roadKm(anchor, spot);
+        if (!best || cost < best.cost) best = { j, ti, cost };
+      });
+    }
+    if (!best) break;
+    days[best.ti].push(from.splice(best.j, 1)[0]);
+    moved++;
+  }
+  return moved;
+}
+
+async function generateAIPlan(force) {
+  if (state.aiBusy) return;
+  if (!state.selected.length) return toast('请先在步骤③选择景点');
+  const sig = aiPlanSignature();
+  if (!force && state.orders.ai && state.aiPlan && state.aiPlan.sig === sig) {
+    applyScheme('ai');
+    return;
+  }
+  if (AI.cfg.provider === 'demo' || !AI.ready()) {
+    openAiOut('✨ AI 编排',
+      'AI 景点编排和步骤①「一句话规划」共用同一套 AI 通道，需要先接入大模型。\n\n'
+      + '点右上角「✨ AI 设置」，选择 DeepSeek / OpenRouter / SiliconFlow 等通道并填入 key，再回来点「✨ AI 编排」。\n\n'
+      + '配置好之前，本地推荐 / 大众经典 / 自定义三种方案都可以照常使用。');
+    return;
+  }
+  const seq = ++aiPlanSeq;
+  state.aiBusy = true;
+  updateSchemeTabsBusy(true);
+  updateAIPlanBar();
+  const messages = [
+    { role: 'system', content: AI_PLAN_SYSTEM },
+    { role: 'user', content: JSON.stringify(aiPlanPayload()) },
+  ];
+  let r;
+  try {
+    r = await AI.chat(messages, { task: 'plan', temperature: 0.2, maxTokens: 1800 });
+  } catch (e) {
+    r = { ok: false, error: (e && e.message) || '请求失败' };
+  }
+  if (seq !== aiPlanSeq) return;  // 期间用户切到了别的方案，丢弃这次结果
+  state.aiBusy = false;
+  updateSchemeTabsBusy(false);
+  if (!r || !r.ok) {
+    updateAIPlanBar();
+    toast('AI 编排失败：' + ((r && r.error) || '未知错误'));
+    if (!state.orders.ai) applyScheme('recommended');
+    return;
+  }
+  const plan = normalizeAIPlan(AI.extractJSON(r.content));
+  if (!plan || !plan.days.flat().length) {
+    updateAIPlanBar();
+    toast('AI 回复里没有可用的编排 JSON，已保留本地方案');
+    if (!state.orders.ai) applyScheme('recommended');
+    return;
+  }
+  state.orders.ai = plan.days;
+  state.aiPlan = {
+    ...plan, sig, model: AI.cfg.model || AI.cfg.provider, at: Date.now(),
+  };
+  state.scheme = 'ai';
+  $$('#schemeTabs button').forEach(b => b.classList.toggle('on', b.dataset.scheme === 'ai'));
+  initModes();
+  renderTimeline();
+  drawRoute(true);
+  updateAIPlanBar();
+  toast('AI 编排完成，已按 AI 分天结果重算路线与通勤方式');
+}
+
 /* --- 一句话生成行程 --- */
 function nlParseLocal(text) { // 离线兜底：只识别「城市 + N 天」
   const days = (text.match(/(\d+)\s*天/) || [])[1];
@@ -2623,6 +3185,8 @@ function gotoStep(n) {
   if (n === 3) showSpots(false);
   if (n >= 4) drawRoute(true);
   else hideRouteLoading();
+  // 手机端每个步骤地图高度不同，切步骤后让 Leaflet / 百度 / 高德重算尺寸
+  setTimeout(() => MAPAPI.resize(), 80);
 }
 
 /* ================= 查询与方案 ================= */
@@ -2654,6 +3218,7 @@ function doQuery() {
   state.days = [...Array(n)].map((_, i) => addDaysStr(a, i));
   state.transport = null;
   state.selected = [];
+  invalidateAIPlan();
   state.spotTier = 'all';
   resetStationSearch();
   fillDepartPoints();
@@ -2668,11 +3233,25 @@ function doQuery() {
 }
 
 function applyScheme(name) {
+  if (name === 'ai') {
+    const fresh = state.orders.ai && state.aiPlan && state.aiPlan.sig === aiPlanSignature();
+    if (!fresh) {
+      generateAIPlan(true).catch(err => toast(`AI 编排失败：${err && err.message ? err.message : err}`));
+      return;  // 等 AI 返回后再切到 AI 方案，失败时保留原来的本地方案
+    }
+  } else if (state.aiBusy) {
+    // 用户主动切回本地方案：作废在途 AI 请求
+    aiPlanSeq++;
+    state.aiBusy = false;
+    updateSchemeTabsBusy(false);
+    updateAIPlanBar();
+  }
   state.scheme = name;
   $$('#schemeTabs button').forEach(b => b.classList.toggle('on', b.dataset.scheme === name));
   initModes();
   renderTimeline();
   drawRoute(true);
+  updateAIPlanBar();
 }
 
 /* ================= 目的地酒店搜索 ================= */
@@ -2741,6 +3320,7 @@ async function searchHotels() {
 }
 
 function redrawAfterHotelChange() {
+  invalidateAIPlan();  // 住宿地变了，AI 的分天假设也变了
   rebuildAccess();
   if (state.step === 2 && state.transport) renderTransport();
   ensureRoutes();
@@ -3037,6 +3617,7 @@ function bind() {
     if (!list.length) return toast('该城市暂无景点数据');
     const top4 = list.slice().sort((a, b) => b.satisfaction - a.satisfaction).slice(0, 4);
     state.selected = top4.map(p => p.id);
+    invalidateAIPlan();
     renderSpots();
     refreshSpotMarkers();
     toast('已选入 4 个最高人气景点，可再手动增减');
@@ -3062,7 +3643,10 @@ function bind() {
   // 步骤 4
   $('#schemeTabs').addEventListener('click', e => {
     const b = e.target.closest('button[data-scheme]');
-    if (b) applyScheme(b.dataset.scheme);
+    if (b && !b.disabled) applyScheme(b.dataset.scheme);
+  });
+  $('#btnAiReplan').addEventListener('click', () => {
+    generateAIPlan(true).catch(err => toast(`AI 编排失败：${err && err.message ? err.message : err}`));
   });
   $('#chkTicket').addEventListener('change', e => {
     state.withTicket = e.target.checked;
@@ -3078,6 +3662,7 @@ function bind() {
     fastestToken++;  // 取消在途的最快组合
     resetFastestButton();
     state.modes = state.modes.map(() => p);
+    state.modeManual = Object.fromEntries(state.modes.map((_, i) => [i, true]));
     renderTimeline();
     drawRoute(false);
   }));
@@ -3085,6 +3670,7 @@ function bind() {
     const chip = e.target.closest('.chip');
     if (chip) {
       state.modes[+chip.dataset.leg] = chip.dataset.mode;
+      state.modeManual[+chip.dataset.leg] = true;
       renderTimeline();
       drawRoute(false);
       return;
@@ -3156,6 +3742,17 @@ function bind() {
   // 地图工具
   $('#btnFitSpots').addEventListener('click', () => waitMap(() => { showSpots(true); }));
   $('#btnFitRoute').addEventListener('click', () => waitMap(() => drawRoute(true)));
+  $('#btnMapFull').addEventListener('click', toggleMapFull);
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && mapFull) setMapFull(false);
+  });
+  let mapResizeTimer = null;
+  const queueMapResize = () => {
+    clearTimeout(mapResizeTimer);
+    mapResizeTimer = setTimeout(() => MAPAPI.resize(), 160);
+  };
+  window.addEventListener('resize', queueMapResize);
+  window.addEventListener('orientationchange', queueMapResize);
 
   // 出发点（从哪出发去车站）：常用地点快捷键 + 模糊搜索候选 + 清除
   $('#btnDepartSearch').addEventListener('click', searchDepartPoints);
