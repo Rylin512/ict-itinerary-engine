@@ -291,7 +291,12 @@
       </div>
       <div class="field">
         <label>模型</label>
-        <input id="aiModel">
+        <input id="aiModel" list="aiModelList" placeholder="点下方「获取可用模型」按实时列表选">
+        <datalist id="aiModelList"></datalist>
+        <p class="hint" id="aiModelHint">上游模型名会下线或改名（如 OpenRouter 的免费 R1 已移除）；填好 key 后点「获取可用模型」拉取当前可用列表。</p>
+        <div class="action-row" style="margin-top:0">
+          <button id="aiModelFetch" class="ghost-btn" type="button">获取可用模型</button>
+        </div>
       </div>
       <div class="field">
         <label>API Key（只存本机浏览器；留空则用本地 serve.py 的环境变量 key）</label>

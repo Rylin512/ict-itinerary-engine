@@ -450,6 +450,43 @@ def handle_llm(body, headers_in):
     return {"ok": True, "content": content, "usage": data.get("usage", {})}
 
 
+def handle_llm_models(body, headers_in):
+    """列出上游可用模型（GET {baseURL}/models）。
+
+    上游模型名会下线/改名（例如 OpenRouter 的 deepseek-r1:free 已移除），
+    让前端能拉实时列表，避免"key 是对的但模型不存在"这种无从排查的失败。
+    """
+    try:
+        base_url = (body.get("baseURL") or "").rstrip("/")
+        if not base_url:
+            raise ValueError("baseURL 必填")
+        if not llm_allowed_host(base_url):
+            raise ValueError(f"上游 {base_url} 不在白名单内")
+        key = resolve_llm_key(base_url, headers_in.get("X-Api-Key"))
+        if not key:
+            raise ValueError("未找到 API key：请在前端填写，或为 serve.py 设置对应环境变量")
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    req = urllib.request.Request(
+        base_url + "/models",
+        headers={"Authorization": f"Bearer {key}"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:300]
+        return {"ok": False, "error": f"上游返回 {exc.code}：{detail}"}
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return {"ok": False, "error": f"上游连接失败：{exc}"}
+    items = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return {"ok": False, "error": f"上游响应格式异常：{json.dumps(data, ensure_ascii=False)[:200]}"}
+    ids = [m.get("id") for m in items if isinstance(m, dict) and m.get("id")]
+    return {"ok": True, "models": ids}
+
+
 # ================= 百度地图开放平台代理（地点检索 + 多模式路线规划） =================
 # 浏览器直连 Web 服务 API 会被 CORS 拦且 AK 暴露；本地 serve.py 转发。
 # AK 优先级：请求头 X-Baidu-Ak > 环境变量 BAIDU_MAP_AK。
@@ -2017,6 +2054,8 @@ class Handler(SimpleHTTPRequestHandler):
             path = self.path.split("?")[0]
             if path == "/api/llm":
                 return self._send(handle_llm(body, self.headers))
+            if path == "/api/llm/models":
+                return self._send(handle_llm_models(body, self.headers))
             if path == "/api/baidu/place":
                 return self._send(handle_baidu_place(body, self.headers))
             if path == "/api/baidu/suggest":

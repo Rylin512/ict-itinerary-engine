@@ -2332,7 +2332,8 @@ async function aiGenGuide() {
     ];
     const r = await AI.chat(messages, { task: 'guide', temperature: 0.5, maxTokens: 1200 });
     $('#guideGen').textContent = '让 AI 生成该城市攻略';
-    if (!r.ok) return toast(`生成失败：${r.error.slice(0, 80)}`);
+    // 失败时用输出弹窗展示完整报错：toast 会截断模型下线等关键提示
+    if (!r.ok) return openAiOut('⚠ 攻略生成失败', r.error);
     const data = AI.extractJSON(r.content);
     if (!data || !data.food) return toast('AI 返回内容无法解析为攻略，请重试');
     data.food = (data.food || []).map(i => ({ ...i, src: 'AI 生成，仅供参考' }));
@@ -2395,6 +2396,11 @@ function openAiSettings() {
   $('#aiModel').value = AI.cfg.model || AI_PROVIDERS[AI.cfg.provider].model || '';
   $('#aiKey').value = AI.cfg.key || '';
   $('#aiProviderHint').textContent = AI_PROVIDERS[AI.cfg.provider].hint;
+  // 每次打开重置模型列表与提示，避免看到上一个通道的旧候选
+  const modelList = $('#aiModelList');
+  if (modelList) modelList.innerHTML = '';
+  const modelHint = $('#aiModelHint');
+  if (modelHint) modelHint.textContent = '上游模型名会下线或改名（如 OpenRouter 的免费 R1 已移除）；填好 key 后点「获取可用模型」拉取当前可用列表。';
   // 演示模式不需要任何凭据：隐藏真实通道字段，避免"填了却不生效"的误导
   $('#aiRealFields').classList.toggle('hidden', AI.cfg.provider === 'demo');
   $('#baiduAk').value = BAIDU.key || '';
@@ -2454,11 +2460,61 @@ async function saveCacheConfig() {
   }
 }
 
+// 用设置面板里「当前填的」值临时替换 AI.cfg 执行动作：
+// 用户填完 key 直接点测试/取模型时，不该还在用上次保存的旧配置。
+async function withFormCfg(fn) {
+  const prev = { cfg: AI.cfg, server: AI.server };
+  AI.cfg = {
+    provider: $('#aiProvider').value || AI.cfg.provider,
+    baseURL: ($('#aiBaseURL').value || '').trim(),
+    model: ($('#aiModel').value || '').trim(),
+    key: ($('#aiKey').value || '').trim(),
+  };
+  try {
+    return await fn();
+  } finally {
+    AI.cfg = prev.cfg;
+    AI.server = prev.server;
+  }
+}
+
+// 拉取上游实时模型列表，填进 datalist 供输入框下拉选择
+async function fetchAiModels() {
+  const btn = $('#aiModelFetch');
+  const hint = $('#aiModelHint');
+  const status = $('#aiStatus');
+  const formModel = ($('#aiModel').value || '').trim();
+  if (!($('#aiBaseURL').value || '').trim()) return toast('先填 Base URL');
+  if (btn) { btn.disabled = true; btn.textContent = '获取中…'; }
+  try {
+    const r = await withFormCfg(() => AI.listModels());
+    if (!r.ok) {
+      if (hint) hint.textContent = `获取失败：${String(r.error || '').slice(0, 200)}`;
+      return;
+    }
+    const models = r.models || [];
+    const list = $('#aiModelList');
+    if (list) list.innerHTML = models.map(id => `<option value="${esc(id)}"></option>`).join('');
+    if (hint) {
+      hint.textContent = models.length
+        ? `已拉取 ${models.length} 个模型，点模型输入框下拉选择。`
+        : '上游返回了空列表，请确认 key 的权限。';
+    }
+    // 当前模型不在列表里就明确提示（大概率已下线）
+    if (models.length && formModel && !models.includes(formModel) && status) {
+      status.textContent = `⚠ 当前模型「${formModel}」不在可用列表中，请重新选择`;
+    }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '获取可用模型'; }
+  }
+}
+
 async function testAi() {
   if (!aiBegin()) return;
   try {
     $('#aiStatus').textContent = '测试连通中…';
-    const r = await AI.chat([{ role: 'user', content: '收到请只回复：ok' }], { task: 'test', maxTokens: 8, timeoutMs: 20000 });
+    const r = await withFormCfg(() =>
+      AI.chat([{ role: 'user', content: '收到请只回复：ok' }], { task: 'test', maxTokens: 8, timeoutMs: 20000 }));
     $('#aiStatus').textContent = r.ok
       ? `✅ 连通正常（${r.via === 'demo' ? '离线演示' : r.via === 'proxy' ? '本地代理' : '直连'}）`
       : `❌ ${r.error}`;
@@ -3300,6 +3356,8 @@ function bind() {
     $('#aiModel').value = p.model || '';
     $('#aiProviderHint').textContent = p.hint;
     $('#aiRealFields').classList.toggle('hidden', p === AI_PROVIDERS.demo);
+    const list = $('#aiModelList');
+    if (list) list.innerHTML = '';   // 换通道后旧模型候选作废
   });
   $('#aiSave').addEventListener('click', () => {
     const provider = $('#aiProvider').value;
@@ -3339,6 +3397,8 @@ function bind() {
     if (MAPS.available()) ensureRoutes(); // 新 AK 立刻升级路网估算
   });
   $('#aiTest').addEventListener('click', testAi);
+  const modelBtn = $('#aiModelFetch');
+  if (modelBtn) modelBtn.addEventListener('click', fetchAiModels);
   $$('#aiModal [data-close], #aiOut [data-close]').forEach(b =>
     b.addEventListener('click', () => b.closest('.modal').classList.add('hidden')));
   // 点遮罩关闭：按下与松开都在遮罩上才算。在输入框里拖选/长按文字时手指滑出

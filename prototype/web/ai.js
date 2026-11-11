@@ -10,10 +10,11 @@
 
 const AI_PROVIDERS = {
   openrouter: {
-    label: 'OpenRouter（有免费 DeepSeek 模型，浏览器直连）',
+    label: 'OpenRouter（有免费模型，浏览器直连）',
     baseURL: 'https://openrouter.ai/api/v1',
-    model: 'deepseek/deepseek-r1:free',
-    hint: '免费账户每天约 50 次请求，openrouter.ai 注册建 key 即可，无需绑卡；模型列表以官网为准',
+    // 默认模型会随上游下线而失效；填好 key 后点「获取可用模型」可拉取实时列表
+    model: 'baidu/ernie-5.5-flash-preview:free',
+    hint: '免费模型速度/额度有限，模型经常改名：填好 key 后点「获取可用模型」按实时列表选；付费模型需在 openrouter.ai 充值',
   },
   deepseek: {
     label: 'DeepSeek 官方（需本地 serve.py 代理）',
@@ -120,6 +121,11 @@ const AI = {
       if (useProxy) headers['X-Api-Key'] = this.cfg.key;
       else headers['Authorization'] = `Bearer ${this.cfg.key}`;
     }
+    // OpenRouter 建议带来源标识（直连时补上，代理模式由 serve.py 统一加）
+    if (!useProxy && /openrouter/i.test(this.cfg.baseURL || '')) {
+      headers['HTTP-Referer'] = location.origin;
+      headers['X-Title'] = 'itinerary-engine';
+    }
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
@@ -136,10 +142,10 @@ const AI = {
         }),
       });
       const data = await r.json().catch(() => ({}));
-      if (useProxy) return data; // serve.py 已归一化 {ok, content, error}
+      if (useProxy) return this._explain(data); // serve.py 已归一化 {ok, content, error}
       const content = data.choices && data.choices[0] && data.choices[0].message
         ? (data.choices[0].message.content || '') : '';
-      if (!r.ok) return { ok: false, via: 'direct', error: `上游返回 ${r.status}：${JSON.stringify(data).slice(0, 300)}` };
+      if (!r.ok) return this._explain({ ok: false, via: 'direct', error: `上游返回 ${r.status}：${JSON.stringify(data).slice(0, 300)}` });
       return { ok: true, content, via: 'direct' };
     } catch (e) {
       if (ctrl.signal.aborted) {
@@ -147,6 +153,50 @@ const AI = {
           error: `AI 通道 ${Math.round(timeoutMs / 1000)} 秒无响应，已中断。推理模型（deepseek-r1 等）首轮思考较慢，可换更快的模型（deepseek-chat / V3），或在「AI 设置 → 测试连通」确认通道可用后重试。` };
       }
       return { ok: false, via: useProxy ? 'proxy' : 'direct', error: `请求失败：${e.message}` };
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+
+  // 上游报错时补一句可行动提示：模型名失效是最常见、也最难自查的失败
+  _explain(res) {
+    if (!res || res.ok || !res.error) return res;
+    const msg = String(res.error);
+    if (/model/i.test(msg)
+      && /(not\s*(a\s*)?valid|not\s*found|unknown|invalid|does\s*not\s*exist|no\s*such|no\s*allowed\s*providers|不存在|不支持)/i.test(msg)) {
+      res.error = `${msg}\n\n提示：模型「${this.cfg.model}」在上游可能已下线或改名。点「获取可用模型」拉取实时列表后重新选择。`;
+    }
+    return res;
+  },
+
+  // 拉取上游实时模型列表（渠道模型名经常变动，靠它自查）
+  async listModels() {
+    const base = (this.cfg.baseURL || '').replace(/\/$/, '');
+    if (!base) return { ok: false, error: '先填 Base URL' };
+    const useProxy = !!this.server;
+    const headers = {};
+    if (this.cfg.key) {
+      if (useProxy) headers['X-Api-Key'] = this.cfg.key;
+      else headers['Authorization'] = `Bearer ${this.cfg.key}`;
+    }
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 25000);
+    try {
+      const r = useProxy
+        ? await fetch('/api/llm/models', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...headers },
+          signal: ctrl.signal,
+          body: JSON.stringify({ baseURL: base }),
+        })
+        : await fetch(base + '/models', { method: 'GET', headers, signal: ctrl.signal });
+      const data = await r.json().catch(() => ({}));
+      if (useProxy) return data;
+      if (!r.ok) return { ok: false, error: `上游返回 ${r.status}：${JSON.stringify(data).slice(0, 200)}` };
+      const ids = (data.data || []).map(m => m && m.id).filter(Boolean);
+      return { ok: true, models: ids };
+    } catch (e) {
+      return { ok: false, error: ctrl.signal.aborted ? '获取模型列表超时' : `请求失败：${e.message}` };
     } finally {
       clearTimeout(timer);
     }

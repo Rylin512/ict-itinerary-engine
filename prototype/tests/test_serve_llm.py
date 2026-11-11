@@ -3,6 +3,7 @@
     python -m unittest discover -s tests -t . -v
 """
 
+import json
 import os
 import sys
 import unittest
@@ -100,6 +101,46 @@ class TestBuildRequest(unittest.TestCase):
                         side_effect=lambda req, timeout: captured.update(t=timeout) or resp):
             serve.call_upstream("https://api.deepseek.com/v1/chat/completions", {}, {})
         self.assertLessEqual(captured["t"], 60)
+
+
+class TestLlmModels(unittest.TestCase):
+    """模型列表接口：channel 模型名经常下线，前端靠它自查可用模型。"""
+
+    def _headers(self, key="sk-test"):
+        return {"X-Api-Key": key}
+
+    def _mock_reply(self, payload, status=None):
+        resp = mock.MagicMock()
+        resp.read.return_value = json.dumps(payload).encode("utf-8")
+        resp.__enter__.return_value = resp
+        return resp
+
+    def test_returns_model_ids(self):
+        reply = self._mock_reply({"data": [{"id": "deepseek-chat"}, {"id": "deepseek-reasoner"}, {"x": 1}]})
+        with mock.patch("serve.urllib.request.urlopen", return_value=reply):
+            out = serve.handle_llm_models({"baseURL": "https://api.deepseek.com/v1"}, self._headers())
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["models"], ["deepseek-chat", "deepseek-reasoner"])
+
+    def test_rejects_bad_host_and_missing_key(self):
+        out = serve.handle_llm_models({"baseURL": "https://evil.com/v1"}, self._headers())
+        self.assertFalse(out["ok"])
+        self.assertIn("白名单", out["error"])
+        with mock.patch.dict(os.environ, {}, clear=True):
+            out = serve.handle_llm_models({"baseURL": "https://api.deepseek.com/v1"}, {})
+        self.assertFalse(out["ok"])
+        self.assertIn("key", out["error"])
+
+    def test_http_error_is_reported(self):
+        err = serve.urllib.error.HTTPError(
+            "https://api.deepseek.com/v1/models", 401, "Unauthorized", {},
+            mock.MagicMock(read=lambda: b'{"error":"invalid key"}'),
+        )
+        with mock.patch("serve.urllib.request.urlopen", side_effect=err):
+            out = serve.handle_llm_models({"baseURL": "https://api.deepseek.com/v1"}, self._headers())
+        self.assertFalse(out["ok"])
+        self.assertIn("401", out["error"])
+        self.assertIn("invalid key", out["error"])
 
 
 class TestAiConfig(unittest.TestCase):
