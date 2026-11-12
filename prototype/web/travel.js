@@ -2331,24 +2331,36 @@ async function aiGenGuide() {
   if (!aiGuard() || !aiBegin()) return;
   try {
     const city = state.to.name;
-    $('#guideGen').textContent = '生成中…';
+    $('#guideGen').textContent = AI.searchReady() ? '联网检索并生成中…' : '生成中…';
+    // 联网检索目的地攻略，让生成内容有真实依据
+    let webBlock = '';
+    let searchNote = '';
+    const sr = await tryWebSearch(`${city} 旅游攻略 美食 住宿 必玩`, 6);
+    if (sr.ok && sr.results.length) {
+      searchNote = `🔍 已联网检索 ${sr.results.length} 条网页（搜索源：${sr.provider === 'bocha' ? '博查' : 'Tavily'}）\n\n`;
+      webBlock = `\n\n网络检索结果（生成时可参考其中的真实区域/类型，但不要照抄具体店名和价格）：\n`
+        + sr.results.map((s, i) => `[${i + 1}] ${s.title}\n${s.snippet}\n来源：${s.url}`).join('\n\n');
+    }
     const messages = [
-      { role: 'system', content: '你是旅行攻略编辑。为目的地城市生成简明攻略 JSON：{"food":[{"t":"条目名","d":"两句话说明"}],"stay":[...],"tips":[...],"ideas":[{"t":"行程名","d":"按天一句话"}]}。food/stay/tips 各 3-4 条，ideas 1-2 条；内容基于你的公开常识，不要编造具体店名价格，用「区域/类型」表述；只输出 JSON。' },
-      { role: 'user', content: `目的地：${city}` },
+      { role: 'system', content: '你是旅行攻略编辑。为目的地城市生成简明攻略 JSON：{"food":[{"t":"条目名","d":"两句话说明"}],"stay":[...],"tips":[...],"ideas":[{"t":"行程名","d":"按天一句话"}]}。food/stay/tips 各 3-4 条，ideas 1-2 条；内容基于你的公开常识与给定的网络检索结果，不要编造具体店名价格，用「区域/类型」表述；只输出 JSON。' },
+      { role: 'user', content: `目的地：${city}${webBlock}` },
     ];
     const r = await AI.chat(messages, { task: 'guide', temperature: 0.5, maxTokens: 1200 });
     $('#guideGen').textContent = '让 AI 生成该城市攻略';
     // 失败时用输出弹窗展示完整报错：toast 会截断模型下线等关键提示
-    if (!r.ok) return openAiOut('⚠ 攻略生成失败', r.error);
+    if (!r.ok) return openAiOut(searchNote + '⚠ 攻略生成失败', r.error);
     const data = AI.extractJSON(r.content);
     if (!data || !data.food) return toast('AI 返回内容无法解析为攻略，请重试');
-    data.food = (data.food || []).map(i => ({ ...i, src: 'AI 生成，仅供参考' }));
-    data.stay = (data.stay || []).map(i => ({ ...i, src: 'AI 生成，仅供参考' }));
-    data.tips = (data.tips || []).map(i => ({ ...i, src: 'AI 生成，仅供参考' }));
-    data.ideas = (data.ideas || []).map(i => ({ ...i, src: 'AI 生成，仅供参考' }));
+    const srcTag = sr.ok && sr.results.length
+      ? `AI 生成 · 联网参考 ${sr.results.length} 个网页，仅供参考`
+      : 'AI 生成，仅供参考';
+    data.food = (data.food || []).map(i => ({ ...i, src: srcTag }));
+    data.stay = (data.stay || []).map(i => ({ ...i, src: srcTag }));
+    data.tips = (data.tips || []).map(i => ({ ...i, src: srcTag }));
+    data.ideas = (data.ideas || []).map(i => ({ ...i, src: srcTag }));
     localStorage.setItem(GUIDE_LS(city), JSON.stringify(data));
     renderGuide();
-    toast(`已生成「${city}」攻略（存本机缓存）`);
+    toast(`已生成「${city}」攻略（${sr.ok && sr.results.length ? '联网参考，' : ''}存本机缓存）`);
   } finally {
     aiEnd();
   }
@@ -2363,14 +2375,25 @@ async function guideAsk() {
     const ctx = retrieveGuide(city, q);
     const ctxText = ctx.map(i => `- [${i.cat}] ${i.t}：${i.d}（${i.src}）`).join('\n') || '（攻略库暂无该城市条目）';
     const pois = (POIS[city] || []).map(p => `${p.name}（${tierLabel(p.tier)}；${p.note || ''}）`).join('；') || '（该城市暂无景点数据）';
-    openAiOut('🤖 目的地问答', '检索攻略库并生成回答…');
+    openAiOut('🤖 目的地问答', AI.searchReady() ? '联网检索中…' : '检索攻略库并生成回答…');
+    // 联网搜索：先检索实时网页，再把命中条目喂给 AI 作答（国内大模型式"联网 + 引用来源"）
+    let sources = [];
+    let searchNote = '';
+    let webBlock = '';
+    const sr = await tryWebSearch(`${city} ${q}`, 6);
+    if (sr.ok && sr.results.length) {
+      sources = sr.results;
+      searchNote = `🔍 已联网检索 ${sources.length} 条网页（搜索源：${sr.provider === 'bocha' ? '博查' : 'Tavily'}）\n\n`;
+      webBlock = `\n\n网络检索结果（信息较新，可优先引用；引用时标注 [序号]，不要编造检索结果里没有的店名/价格）：\n`
+        + sources.map((s, i) => `[${i + 1}] ${s.title}\n${s.snippet}\n来源：${s.url}`).join('\n\n');
+    }
     const messages = [
-      { role: 'system', content: '你是目的地攻略问答助手。只允许基于给定条目回答；引用条目时注明来源；条目里没有的信息直说「攻略库里没有，建议出行前自行核实」，禁止编造店名/价格/时刻。用中文简洁回答。' },
-      { role: 'user', content: `问题：${q}\n\n攻略库检索条目：\n${ctxText}\n\n已收录景点备注：\n${pois}` },
+      { role: 'system', content: '你是目的地攻略问答助手。优先基于「网络检索结果」回答并标注 [序号] 来源；没有检索结果或检索不足时基于给定攻略条目回答并注明来源；条目和检索里都没有的信息直说「建议出行前自行核实」，禁止编造店名/价格/时刻。用中文简洁回答。' },
+      { role: 'user', content: `问题：${q}\n\n攻略库检索条目：\n${ctxText}\n\n已收录景点备注：\n${pois}${webBlock}` },
     ];
-    const r = await AI.chat(messages, { task: 'qa', temperature: 0.4, maxTokens: 600 });
-    setAiOut((r.ok ? r.content : `❌ ${r.error}`)
-      + `\n\n—— 检索命中 ${ctx.length} 条攻略条目${AI.cfg.provider === 'demo' ? '（离线演示模式未调用大模型）' : ''}`);
+    const r = await AI.chat(messages, { task: 'qa', temperature: 0.4, maxTokens: sources.length ? 800 : 600 });
+    setAiOut(searchNote + (r.ok ? r.content : `❌ ${r.error}`)
+      + `\n\n—— 攻略库命中 ${ctx.length} 条${AI.cfg.provider === 'demo' ? '（离线演示模式未调用大模型）' : ''}`, sources);
   } finally {
     aiEnd();
   }
@@ -2407,6 +2430,11 @@ function openAiSettings() {
   if (modelList) modelList.innerHTML = '';
   const modelHint = $('#aiModelHint');
   if (modelHint) modelHint.textContent = '上游模型名会下线或改名（如 OpenRouter 的免费 R1 已移除）；填好 key 后点「获取可用模型」拉取当前可用列表。';
+  // 联网搜索设置回显
+  $('#webSearchOn').value = AI.cfg.searchOn ? 'on' : 'off';
+  $('#webSearchProvider').value = AI.cfg.searchProvider || 'auto';
+  $('#webSearchKey').value = AI.cfg.searchKey || '';
+  $('#webSearchStatus').textContent = AI.searchStatusText();
   // 演示模式不需要任何凭据：隐藏真实通道字段，避免"填了却不生效"的误导
   $('#aiRealFields').classList.toggle('hidden', AI.cfg.provider === 'demo');
   $('#baiduAk').value = BAIDU.key || '';
@@ -2515,8 +2543,32 @@ async function fetchAiModels() {
   }
 }
 
-async function testAi() {
-  if (!aiBegin()) return;
+// 用设置面板里当前填写的搜索配置做一次真实检索，验证通道
+async function testWebSearch() {
+  const status = $('#webSearchStatus');
+  const prev = { cfg: AI.cfg, server: AI.server };
+  AI.cfg = {
+    ...AI.cfg,
+    searchOn: $('#webSearchOn').value === 'on',
+    searchProvider: $('#webSearchProvider').value,
+    searchKey: ($('#webSearchKey').value || '').trim(),
+  };
+  const btn = $('#webSearchTest');
+  if (btn) { btn.disabled = true; btn.textContent = '测试中…'; }
+  try {
+    if (!$('#webSearchOn').value) { /* 控件未渲染时兜底 */ }
+    const r = await AI.webSearch('成都 美食', 3);
+    status.textContent = r.ok && r.results.length
+      ? `✅ 联网搜索正常（${r.provider === 'bocha' ? '博查' : 'Tavily'}，返回 ${r.results.length} 条测试结果）`
+      : `❌ ${r.error || '未返回结果'}`;
+  } finally {
+    AI.cfg = prev.cfg;
+    AI.server = prev.server;
+    if (btn) { btn.disabled = false; btn.textContent = '测试联网搜索'; }
+  }
+}
+
+async function testAi() {  if (!aiBegin()) return;
   try {
     $('#aiStatus').textContent = '测试连通中…';
     const r = await withFormCfg(() =>
@@ -2535,9 +2587,29 @@ function openAiOut(title, body) {
   $('#aiOutBody').classList.add('loading');
   $('#aiOut').classList.remove('hidden');
 }
-function setAiOut(text) {
-  $('#aiOutBody').textContent = text;
+function setAiOut(text, sources) {
+  const el = $('#aiOutBody');
+  el.textContent = text;
   $('#aiOutBody').classList.remove('loading');
+  // 联网检索来源：回答下方列出可点击链接（像国内大模型的"引用来源"）
+  const old = el.querySelector('.ai-src');
+  if (old) old.remove();
+  if (sources && sources.length) {
+    const box = document.createElement('div');
+    box.className = 'ai-src';
+    box.innerHTML = '<div class="ai-src-head">🔗 来源（点击查看原文）</div>'
+      + sources.map((s, i) =>
+        `<a href="${esc(s.url)}" target="_blank" rel="noopener">[${i + 1}] ${esc(s.title || s.url)}</a>`).join('');
+    el.appendChild(box);
+  }
+}
+
+// 联网检索：AI.cfg.searchOn 开启且 serve.py 在线时检索，返回 {ok, results} 或 {ok:false}
+async function tryWebSearch(query, count = 6) {
+  if (!AI.searchReady()) return { ok: false, skipped: true, error: AI.searchStatusText() };
+  const r = await AI.webSearch(query, count);
+  if (!r.ok) toast(`联网搜索不可用，已跳过：${String(r.error || '').slice(0, 60)}`);
+  return r;
 }
 
 function buildPlanJSON() { // 只打包结构化事实给 LLM，遵守"表达层禁止新增事实"
@@ -3373,6 +3445,9 @@ function bind() {
       baseURL: provider === 'demo' ? '' : $('#aiBaseURL').value.trim(),
       model: provider === 'demo' ? '' : $('#aiModel').value.trim(),
       key: provider === 'demo' ? '' : $('#aiKey').value.trim(),
+      searchOn: $('#webSearchOn').value === 'on',
+      searchProvider: $('#webSearchProvider').value,
+      searchKey: $('#webSearchKey').value.trim(),
     };
     AI.save();
     const browserAkChanged = BAIDU.browserKey !== $('#baiduAkBrowser').value.trim();
@@ -3405,6 +3480,8 @@ function bind() {
   $('#aiTest').addEventListener('click', testAi);
   const modelBtn = $('#aiModelFetch');
   if (modelBtn) modelBtn.addEventListener('click', fetchAiModels);
+  const wsBtn = $('#webSearchTest');
+  if (wsBtn) wsBtn.addEventListener('click', testWebSearch);
   $$('#aiModal [data-close], #aiOut [data-close]').forEach(b =>
     b.addEventListener('click', () => b.closest('.modal').classList.add('hidden')));
   // 点遮罩关闭：按下与松开都在遮罩上才算。在输入框里拖选/长按文字时手指滑出

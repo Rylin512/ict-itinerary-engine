@@ -625,6 +625,19 @@ button.on.ghost-btn{background:var(--accent-soft);border-color:var(--accent);col
 }
 .ai-out.loading{color:var(--muted)}
 
+/* 联网搜索：来源引用（像国内大模型的"引用来源"） */
+.ai-out .ai-src{
+  white-space:normal;margin-top:12px;padding-top:10px;
+  border-top:1px dashed var(--line);
+  display:grid;gap:5px;
+}
+.ai-out .ai-src-head{font-size:12px;color:var(--muted);font-weight:600}
+.ai-out .ai-src a{
+  font-size:12.5px;color:#1f6b4f;text-decoration:none;line-height:1.5;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block;
+}
+.ai-out .ai-src a:hover{text-decoration:underline}
+
 /* ---------- 城市选择（可搜索的下拉） ---------- */
 .combo{position:relative}
 .combo-native{display:none}

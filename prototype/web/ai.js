@@ -45,8 +45,8 @@ const AI_PROVIDERS = {
 const AI_LS_KEY = 'travel.ai.config';
 
 const AI = {
-  cfg: { provider: 'demo', baseURL: '', model: '', key: '' },
-  server: null, // serve.py 探测结果：{proxy, channels:[...], fallbackReady} | null
+  cfg: { provider: 'demo', baseURL: '', model: '', key: '', searchOn: true, searchProvider: 'auto', searchKey: '' },
+  server: null, // serve.py 探测结果：{proxy, channels:[...], fallbackReady, search} | null
 
   load() {
     try {
@@ -59,7 +59,52 @@ const AI = {
   },
   clear() {
     localStorage.removeItem(AI_LS_KEY);
-    this.cfg = { provider: 'demo', baseURL: '', model: '', key: '' };
+    this.cfg = { provider: 'demo', baseURL: '', model: '', key: '', searchOn: true, searchProvider: 'auto', searchKey: '' };
+  },
+
+  // 联网搜索是否可用：开关开启 + 有 serve.py 代理 + 有可用搜索源（页面 key 或环境变量）
+  searchReady() {
+    if (!this.cfg.searchOn) return false;
+    if (!this.server || !this.server.proxy) return false;
+    if (this.cfg.searchProvider !== 'auto' && this.cfg.searchProvider !== 'bocha' && this.cfg.searchProvider !== 'tavily') return false;
+    if (this.cfg.searchKey) return true;
+    const s = this.server.search || {};
+    if (this.cfg.searchProvider === 'auto') return !!(s.bocha || s.tavily);
+    return !!s[this.cfg.searchProvider];
+  },
+
+  searchStatusText() {
+    if (!this.cfg.searchOn) return '联网搜索：已关闭';
+    if (!this.server || !this.server.proxy) return '联网搜索：需本地 serve.py 在线';
+    const s = this.server.search || {};
+    const env = [s.bocha ? '博查' : null, s.tavily ? 'Tavily' : null].filter(Boolean).join(' / ');
+    const via = this.cfg.searchKey ? `页面 key（${this.cfg.searchProvider === 'auto' ? '自动' : this.cfg.searchProvider === 'bocha' ? '博查' : 'Tavily'}）` : (env ? `环境变量（${env}）` : '未配置搜索 key');
+    return `联网搜索：${this.cfg.searchProvider === 'auto' ? '自动选择' : this.cfg.searchProvider === 'bocha' ? '博查' : 'Tavily'} · ${via}`;
+  },
+
+  // 联网检索（经 serve.py /api/web-search 代理）：返回 {ok, results:[{title,url,snippet}]}
+  async webSearch(query, count = 6) {
+    if (!this.cfg.searchOn) return { ok: false, error: '联网搜索已关闭' };
+    if (!this.server || !this.server.proxy) return { ok: false, error: '联网搜索需要本地 serve.py 在线' };
+    const headers = { 'Content-Type': 'application/json' };
+    if (this.cfg.searchKey) headers['X-Search-Key'] = this.cfg.searchKey;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 15000);
+    try {
+      const r = await fetch('/api/web-search', {
+        method: 'POST',
+        headers,
+        signal: ctrl.signal,
+        body: JSON.stringify({ query, count, provider: this.cfg.searchProvider || 'auto' }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.status === 404) return { ok: false, error: '本地 serve.py 不支持联网搜索（版本较旧），请重启 serve.py' };
+      return data && data.ok ? data : { ok: false, error: (data && data.error) || `搜索返回 ${r.status}` };
+    } catch (e) {
+      return { ok: false, error: ctrl.signal.aborted ? '联网搜索超时（15 秒），已跳过' : `搜索请求失败：${e.message}` };
+    } finally {
+      clearTimeout(timer);
+    }
   },
 
   async probeServer() {
