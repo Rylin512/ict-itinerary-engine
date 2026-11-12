@@ -310,7 +310,13 @@ async function ensureRoutes() { // 批量拉真实路网，回来后按当前步
       [key, state.transport ? await pairEstimate(state.to.name, a, b) : null]),
   );
   if (seqId !== routesSeq) return;
-  results.forEach(([key, est]) => { if (est) routeEst.set(key, est); });
+  let added = 0;
+  results.forEach(([key, est]) => { if (est) { routeEst.set(key, est); added++; } });
+  // 关键护栏：本轮没有任何新估算入缓存时，绝不能再触发重渲染。
+  // renderTimeline 末尾会调 ensureRoutes，若这里照旧 rebuildAccess+renderTimeline，
+  // 而缺失 pair 永远拿不到结果（如未选城际交通时 est 恒为 null），
+  // 就会形成 renderTimeline→ensureRoutes→renderTimeline 的微任务死循环，页面瞬间冻死。
+  if (!added) return;
   rebuildAccess();
   if (state.step === 2) renderTransport();
   if (state.step >= 4) { renderTimeline(); drawRoute(false); }

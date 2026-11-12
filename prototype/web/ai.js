@@ -166,6 +166,15 @@ const AI = {
       && /(not\s*(a\s*)?valid|not\s*found|unknown|invalid|does\s*not\s*exist|no\s*such|no\s*allowed\s*providers|不存在|不支持)/i.test(msg)) {
       res.error = `${msg}\n\n提示：模型「${this.cfg.model}」在上游可能已下线或改名。点「获取可用模型」拉取实时列表后重新选择。`;
     }
+    // OpenRouter 对"无法识别的 key"统一报 Missing Authentication header：
+    // key 与通道不匹配（如把 DeepSeek 的 key 填在 OpenRouter）、复制不完整，
+    // 或页面跑的还是旧版脚本（不发 Authorization 头），都会命中
+    if (/Missing Authentication header/i.test(msg) && this.cfg.key) {
+      res.error = `${msg}\n\n提示：上游没有认出你填的 key。① 确认 key 与所选通道匹配（OpenRouter 的 key 形如 sk-or-v1-…，DeepSeek / 硅基流动为 sk-…）；② 重新生成并完整复制 key；③ 强制刷新页面（Ctrl+Shift+R）排除旧版脚本缓存。`;
+    }
+    if (/(User not found|invalid_request_error|invalid api key|incorrect api key|authentication.?fails|token is invalid)/i.test(msg)) {
+      res.error = `${msg}\n\n提示：key 被上游判定为无效——请在上游控制台重新生成 key 并完整复制；确认账户有可用额度。`;
+    }
     return res;
   },
 
