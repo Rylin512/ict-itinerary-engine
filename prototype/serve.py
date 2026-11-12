@@ -417,8 +417,8 @@ def ai_config():
             for frag, env in LLM_HOST_KEYS
         ],
         "fallbackReady": bool(os.environ.get("LLM_API_KEY")),
-        # 联网搜索：key 只报有无
-        "search": {p: bool(search_provider_key(p)) for p, _ in SEARCH_PROVIDER_KEYS},
+        # 联网搜索：key 只报有无；demo 恒可用
+        "search": {p: bool(search_provider_key(p)) for p, _ in SEARCH_PROVIDER_KEYS} | {"demo": True},
     }
 
 
@@ -548,16 +548,35 @@ def parse_search_response(provider, data):
     return out
 
 
+def demo_search_results(query, count):
+    """离线演示搜索源：无需任何 key，返回预置检索结果（明确标注演示）。
+    用于答辩断网兜底 / 未注册搜索 key 时体验完整的联网问答交互。"""
+    q = (query or "").strip() or "旅游"
+    results = [
+        {"title": f"【演示】{q} 精选推荐", "url": "https://www.example.com/demo-search/1",
+         "snippet": f"关于「{q}」的演示检索摘要：本地预置数据，无需联网与 key 即可体验"
+                    "「检索提示 → 引用标注 → 来源链接」的完整联网问答交互。"},
+        {"title": f"【演示】{q} 实用指南", "url": "https://www.example.com/demo-search/2",
+         "snippet": "演示摘要：通用区域 / 类型建议。正式接入博查 / Tavily 后，"
+                    "这里将展示真实搜索引擎返回的内容。"},
+        {"title": f"【演示】{q} 常见问答", "url": "https://www.example.com/demo-search/3",
+         "snippet": "演示摘要：本条用于验证来源列表的展示与跳转（点击为示例链接）。"},
+    ]
+    return results[:max(1, min(int(count or 3), len(results)))]
+
+
 def handle_web_search(body, headers_in):
     provider = (body.get("provider") or "auto").lower()
     try:
         query = body.get("query") or ""
         count = min(max(int(body.get("count") or 6), 1), 10)
+        if provider == "demo":
+            return {"ok": True, "provider": "demo", "results": demo_search_results(query, count)}
         if provider == "auto":
             provider = next((p for p, env in SEARCH_PROVIDER_KEYS
                              if search_provider_key(p, headers_in.get("X-Search-Key"))), None)
             if not provider:
-                return {"ok": False, "error": "未配置联网搜索：请在页面填搜索 key，或为 serve.py 设置 BOCHA_API_KEY / TAVILY_API_KEY 环境变量"}
+                return {"ok": False, "error": "未配置联网搜索：请在页面填搜索 key，或为 serve.py 设置 BOCHA_API_KEY / TAVILY_API_KEY 环境变量；也可把搜索源切到「离线演示」直接体验"}
         key = search_provider_key(provider, headers_in.get("X-Search-Key"))
         if not key:
             return {"ok": False, "error": f"搜索源 {provider} 未配置 key（页面填写或环境变量）"}
@@ -2143,7 +2162,8 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         try:
             n = int(self.headers.get("Content-Length", 0) or 0)
-            body = json.loads(self.rfile.read(n) or b"{}")
+            # errors="replace"：浏览器恒为 UTF-8；编码错误的 CLI 测试也不会 500
+            body = json.loads(self.rfile.read(n).decode("utf-8", errors="replace") or "{}")
             path = self.path.split("?")[0]
             if path == "/api/llm":
                 return self._send(handle_llm(body, self.headers))

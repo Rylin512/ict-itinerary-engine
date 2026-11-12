@@ -62,10 +62,11 @@ const AI = {
     this.cfg = { provider: 'demo', baseURL: '', model: '', key: '', searchOn: true, searchProvider: 'auto', searchKey: '' };
   },
 
-  // 联网搜索是否可用：开关开启 + 有 serve.py 代理 + 有可用搜索源（页面 key 或环境变量）
+  // 联网搜索是否可用：开关开启 + 有 serve.py 代理 + 搜索源可用（演示源无需 key）
   searchReady() {
     if (!this.cfg.searchOn) return false;
     if (!this.server || !this.server.proxy) return false;
+    if (this.cfg.searchProvider === 'demo') return true;
     if (this.cfg.searchProvider !== 'auto' && this.cfg.searchProvider !== 'bocha' && this.cfg.searchProvider !== 'tavily') return false;
     if (this.cfg.searchKey) return true;
     const s = this.server.search || {};
@@ -73,13 +74,19 @@ const AI = {
     return !!s[this.cfg.searchProvider];
   },
 
+  searchProviderLabel(p) {
+    return p === 'bocha' ? '博查' : p === 'tavily' ? 'Tavily' : p === 'demo' ? '离线演示' : '自动';
+  },
+
   searchStatusText() {
     if (!this.cfg.searchOn) return '联网搜索：已关闭';
     if (!this.server || !this.server.proxy) return '联网搜索：需本地 serve.py 在线';
+    const p = this.cfg.searchProvider || 'auto';
+    if (p === 'demo') return '联网搜索：离线演示（预置结果，无需 key）';
     const s = this.server.search || {};
     const env = [s.bocha ? '博查' : null, s.tavily ? 'Tavily' : null].filter(Boolean).join(' / ');
-    const via = this.cfg.searchKey ? `页面 key（${this.cfg.searchProvider === 'auto' ? '自动' : this.cfg.searchProvider === 'bocha' ? '博查' : 'Tavily'}）` : (env ? `环境变量（${env}）` : '未配置搜索 key');
-    return `联网搜索：${this.cfg.searchProvider === 'auto' ? '自动选择' : this.cfg.searchProvider === 'bocha' ? '博查' : 'Tavily'} · ${via}`;
+    const via = this.cfg.searchKey ? `页面 key（${this.searchProviderLabel(p)}）` : (env ? `环境变量（${env}）` : '未配置搜索 key');
+    return `联网搜索：${this.searchProviderLabel(p)} · ${via}`;
   },
 
   // 联网检索（经 serve.py /api/web-search 代理）：返回 {ok, results:[{title,url,snippet}]}
@@ -283,6 +290,17 @@ const AI = {
           `第 ${d.day} 天（${d.date}）：${d.stops.map(x => x.name).join(' → ') || '自由活动'}`);
         return `【离线演示 · 由页面内结构化行程数据汇总，未调用大模型】\n\n这份 ${s.days} 天的 ${s.from}→${s.to} 行程，城际选择了${s.intercity ? s.intercity.mode : '未选'}${s.intercity && s.intercity.board ? `（${s.intercity.board} 上车）` : ''}，全程约 ${s.total.minutes} 分钟、合计 ${s.total.cost} 元。\n\n${lines.join('\n')}\n\n（离线模式只能做事实汇总；配置 AI 通道后，会基于同一份行程 JSON 生成更自然的讲解、排序理由与贴士。）`;
       }
+    }
+    if (task === 'guide') {
+      // 演示攻略：与真实通道同构的 JSON，保证「AI 生成攻略」交互离线可测
+      return '{"food":[{"t":"演示美食条目","d":"离线演示数据：所在城市的热门街区 / 小吃类型（正式接入大模型后由 AI 生成）。"}],"stay":[{"t":"演示住宿条目","d":"按区域推荐：交通枢纽与景点之间的中价位选择。"}],"tips":[{"t":"演示贴士","d":"出行前自行核实营业时间与门票政策。"}],"ideas":[{"t":"演示行程","d":"第一天市区经典线，第二天周边放松线。"}]}';
+    }
+    if (task === 'qa') {
+      // 有检索结果时输出引用样式的演示回答，完整呈现「联网问答」交互
+      if (lastUser && lastUser.content.includes('网络检索结果')) {
+        return '【离线演示 · 联网问答】已检索到演示网页，并按引用格式作答：\n\n根据检索结果 [1][2]，可先看热门街区与经典线路，再按兴趣补充深度玩法；具体店名与价格建议出行前自行核实。\n\n（离线演示回答为预置文案；配置 AI 通道 + 真实搜索源后，这里将由大模型基于真实检索结果生成。）';
+      }
+      return '【离线演示回复】当前未配置 AI 通道。打开右上角「✨ AI 设置」接入 DeepSeek / OpenRouter 即可获得真实问答；本页攻略库中的条目可直接检索使用。';
     }
     if (task === 'nlplan') {
       return '【离线演示】解析结果（演示固定值，真实版由 LLM 解析任意语句）：\n{"city":"成都","days":3,"party":"朋友结伴","budget":2500,"interests":["热门","美食"]}\n\n离线模式也支持「城市 + N 天」的极简格式，例如：成都 3 天';

@@ -113,6 +113,21 @@ class TestAiConfigSearch(unittest.TestCase):
             cfg = serve.ai_config()
         self.assertTrue(cfg["search"]["bocha"])
         self.assertFalse(cfg["search"]["tavily"])
+        self.assertTrue(cfg["search"]["demo"])  # 离线演示源恒可用
+
+
+class TestDemoSearch(unittest.TestCase):
+    def test_demo_provider_needs_no_key_and_mentions_query(self):
+        out = serve.handle_web_search({"query": "成都 美食", "provider": "demo", "count": 3}, {})
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["provider"], "demo")
+        self.assertEqual(len(out["results"]), 3)
+        self.assertTrue(all("演示" in r["title"] for r in out["results"]))
+        self.assertTrue(all(r["url"] for r in out["results"]))
+
+    def test_demo_count_clamped_to_canned_size(self):
+        out = serve.handle_web_search({"query": "q", "provider": "demo", "count": 10}, {})
+        self.assertEqual(len(out["results"]), 3)
 
 
 if __name__ == "__main__":

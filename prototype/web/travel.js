@@ -2337,7 +2337,7 @@ async function aiGenGuide() {
     let searchNote = '';
     const sr = await tryWebSearch(`${city} 旅游攻略 美食 住宿 必玩`, 6);
     if (sr.ok && sr.results.length) {
-      searchNote = `🔍 已联网检索 ${sr.results.length} 条网页（搜索源：${sr.provider === 'bocha' ? '博查' : 'Tavily'}）\n\n`;
+      searchNote = `🔍 已联网检索 ${sr.results.length} 条网页（搜索源：${AI.searchProviderLabel(sr.provider)}）\n\n`;
       webBlock = `\n\n网络检索结果（生成时可参考其中的真实区域/类型，但不要照抄具体店名和价格）：\n`
         + sr.results.map((s, i) => `[${i + 1}] ${s.title}\n${s.snippet}\n来源：${s.url}`).join('\n\n');
     }
@@ -2383,7 +2383,7 @@ async function guideAsk() {
     const sr = await tryWebSearch(`${city} ${q}`, 6);
     if (sr.ok && sr.results.length) {
       sources = sr.results;
-      searchNote = `🔍 已联网检索 ${sources.length} 条网页（搜索源：${sr.provider === 'bocha' ? '博查' : 'Tavily'}）\n\n`;
+      searchNote = `🔍 已联网检索 ${sources.length} 条网页（搜索源：${AI.searchProviderLabel(sr.provider)}）\n\n`;
       webBlock = `\n\n网络检索结果（信息较新，可优先引用；引用时标注 [序号]，不要编造检索结果里没有的店名/价格）：\n`
         + sources.map((s, i) => `[${i + 1}] ${s.title}\n${s.snippet}\n来源：${s.url}`).join('\n\n');
     }
@@ -3482,6 +3482,14 @@ function bind() {
   if (modelBtn) modelBtn.addEventListener('click', fetchAiModels);
   const wsBtn = $('#webSearchTest');
   if (wsBtn) wsBtn.addEventListener('click', testWebSearch);
+  ['webSearchOn', 'webSearchProvider'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', () => {
+      AI.cfg.searchOn = $('#webSearchOn').value === 'on';
+      AI.cfg.searchProvider = $('#webSearchProvider').value;
+      $('#webSearchStatus').textContent = AI.searchStatusText();
+    });
+  });
   $$('#aiModal [data-close], #aiOut [data-close]').forEach(b =>
     b.addEventListener('click', () => b.closest('.modal').classList.add('hidden')));
   // 点遮罩关闭：按下与松开都在遮罩上才算。在输入框里拖选/长按文字时手指滑出
