@@ -87,7 +87,9 @@ const AI = {
   statusText() {
     if (this.cfg.provider === 'demo') return '离线演示模式：返回预置文案（不联网）';
     const viaProxy = this.server && this.server.proxy;
-    const keyFrom = this.cfg.key ? '页面配置的 key' : (viaProxy ? '本地环境变量 key' : '未配置 key');
+    const keyFrom = this.cfg.key
+      ? `页面配置的 key（尾号 ${this.cfg.key.slice(-4)}）`
+      : (viaProxy ? '本地环境变量 key' : '未配置 key');
     return `${this.cfg.model} · ${viaProxy ? '经本地 serve.py 代理' : '浏览器直连'} · ${keyFrom}`;
   },
 
