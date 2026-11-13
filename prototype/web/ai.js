@@ -10,10 +10,11 @@
 
 const AI_PROVIDERS = {
   openrouter: {
-    label: 'OpenRouter（有免费 DeepSeek 模型，浏览器直连）',
+    label: 'OpenRouter（有免费模型，浏览器直连）',
     baseURL: 'https://openrouter.ai/api/v1',
-    model: 'deepseek/deepseek-r1:free',
-    hint: '免费账户每天约 50 次请求，openrouter.ai 注册建 key 即可，无需绑卡；模型列表以官网为准',
+    // 默认模型会随上游下线而失效；填好 key 后点「获取可用模型」可拉取实时列表
+    model: 'baidu/ernie-5.5-flash-preview:free',
+    hint: '免费模型速度/额度有限，模型经常改名：填好 key 后点「获取可用模型」按实时列表选；付费模型需在 openrouter.ai 充值',
   },
   deepseek: {
     label: 'DeepSeek 官方（需本地 serve.py 代理）',
@@ -44,8 +45,8 @@ const AI_PROVIDERS = {
 const AI_LS_KEY = 'travel.ai.config';
 
 const AI = {
-  cfg: { provider: 'demo', baseURL: '', model: '', key: '' },
-  server: null, // serve.py 探测结果：{proxy, channels:[...], fallbackReady} | null
+  cfg: { provider: 'demo', baseURL: '', model: '', key: '', searchOn: true, searchProvider: 'auto', searchKey: '' },
+  server: null, // serve.py 探测结果：{proxy, channels:[...], fallbackReady, search} | null
 
   load() {
     try {
@@ -58,7 +59,59 @@ const AI = {
   },
   clear() {
     localStorage.removeItem(AI_LS_KEY);
-    this.cfg = { provider: 'demo', baseURL: '', model: '', key: '' };
+    this.cfg = { provider: 'demo', baseURL: '', model: '', key: '', searchOn: true, searchProvider: 'auto', searchKey: '' };
+  },
+
+  // 联网搜索是否可用：开关开启 + 有 serve.py 代理 + 搜索源可用（演示源无需 key）
+  searchReady() {
+    if (!this.cfg.searchOn) return false;
+    if (!this.server || !this.server.proxy) return false;
+    if (this.cfg.searchProvider === 'demo') return true;
+    if (this.cfg.searchProvider !== 'auto' && this.cfg.searchProvider !== 'bocha' && this.cfg.searchProvider !== 'tavily') return false;
+    if (this.cfg.searchKey) return true;
+    const s = this.server.search || {};
+    if (this.cfg.searchProvider === 'auto') return !!(s.bocha || s.tavily);
+    return !!s[this.cfg.searchProvider];
+  },
+
+  searchProviderLabel(p) {
+    return p === 'bocha' ? '博查' : p === 'tavily' ? 'Tavily' : p === 'demo' ? '离线演示' : '自动';
+  },
+
+  searchStatusText() {
+    if (!this.cfg.searchOn) return '联网搜索：已关闭';
+    if (!this.server || !this.server.proxy) return '联网搜索：需本地 serve.py 在线';
+    const p = this.cfg.searchProvider || 'auto';
+    if (p === 'demo') return '联网搜索：离线演示（预置结果，无需 key）';
+    const s = this.server.search || {};
+    const env = [s.bocha ? '博查' : null, s.tavily ? 'Tavily' : null].filter(Boolean).join(' / ');
+    const via = this.cfg.searchKey ? `页面 key（${this.searchProviderLabel(p)}）` : (env ? `环境变量（${env}）` : '未配置搜索 key');
+    return `联网搜索：${this.searchProviderLabel(p)} · ${via}`;
+  },
+
+  // 联网检索（经 serve.py /api/web-search 代理）：返回 {ok, results:[{title,url,snippet}]}
+  async webSearch(query, count = 6) {
+    if (!this.cfg.searchOn) return { ok: false, error: '联网搜索已关闭' };
+    if (!this.server || !this.server.proxy) return { ok: false, error: '联网搜索需要本地 serve.py 在线' };
+    const headers = { 'Content-Type': 'application/json' };
+    if (this.cfg.searchKey) headers['X-Search-Key'] = this.cfg.searchKey;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 15000);
+    try {
+      const r = await fetch('/api/web-search', {
+        method: 'POST',
+        headers,
+        signal: ctrl.signal,
+        body: JSON.stringify({ query, count, provider: this.cfg.searchProvider || 'auto' }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.status === 404) return { ok: false, error: '本地 serve.py 不支持联网搜索（版本较旧），请重启 serve.py' };
+      return data && data.ok ? data : { ok: false, error: (data && data.error) || `搜索返回 ${r.status}` };
+    } catch (e) {
+      return { ok: false, error: ctrl.signal.aborted ? '联网搜索超时（15 秒），已跳过' : `搜索请求失败：${e.message}` };
+    } finally {
+      clearTimeout(timer);
+    }
   },
 
   async probeServer() {
@@ -86,16 +139,20 @@ const AI = {
   statusText() {
     if (this.cfg.provider === 'demo') return '离线演示模式：返回预置文案（不联网）';
     const viaProxy = this.server && this.server.proxy;
-    const keyFrom = this.cfg.key ? '页面配置的 key' : (viaProxy ? '本地环境变量 key' : '未配置 key');
+    const keyFrom = this.cfg.key
+      ? `页面配置的 key（尾号 ${this.cfg.key.slice(-4)}）`
+      : (viaProxy ? '本地环境变量 key' : '未配置 key');
     return `${this.cfg.model} · ${viaProxy ? '经本地 serve.py 代理' : '浏览器直连'} · ${keyFrom}`;
   },
 
-  // 统一入口：messages=[{role, content}]，opts={task:'explain'|'qa'|'nlplan', temperature, maxTokens}
+  // 统一入口：messages=[{role, content}]，opts={task, temperature, maxTokens, timeoutMs}
   async chat(messages, opts = {}) {
     if (this.cfg.provider === 'demo') {
       await new Promise(r => setTimeout(r, 350)); // 模拟一点延迟，演示更真实
       return { ok: true, content: this._demo(messages, opts.task || ''), via: 'demo' };
     }
+    // 超时保护：推理模型（如 deepseek-r1:free）思考可达几分钟，不设上限页面会一直"生成中"
+    const timeoutMs = opts.timeoutMs || 60000;
     const body = {
       baseURL: this.cfg.baseURL,
       model: this.cfg.model,
@@ -103,21 +160,33 @@ const AI = {
       temperature: opts.temperature,
       maxTokens: opts.maxTokens,
     };
-    const headers = { 'Content-Type': 'application/json' };
-    if (this.cfg.key) headers['X-Api-Key'] = this.cfg.key;
-
     // DeepSeek 官方没有 CORS：没本地代理就直接给可行动的报错
+    const useProxy = !!this.server;
     if (!this.server) {
       const host = this.cfg.baseURL.toLowerCase();
       if (host.includes('api.deepseek.com')) {
         return { ok: false, via: 'direct', error: 'DeepSeek 官方接口不允许浏览器直连（CORS）。请在 prototype 目录运行 `python serve.py` 后从 http://127.0.0.1:8765/travel.html 打开本页，或改用 OpenRouter（有免费模型）。' };
       }
     }
-    const useProxy = !!this.server;
+    // key 的传递方式：走本地代理用 X-Api-Key（serve.py 从该头取）；
+    // 浏览器直连必须用 OpenAI 兼容标准的 Authorization: Bearer，否则 401
+    const headers = { 'Content-Type': 'application/json' };
+    if (this.cfg.key) {
+      if (useProxy) headers['X-Api-Key'] = this.cfg.key;
+      else headers['Authorization'] = `Bearer ${this.cfg.key}`;
+    }
+    // OpenRouter 建议带来源标识（直连时补上，代理模式由 serve.py 统一加）
+    if (!useProxy && /openrouter/i.test(this.cfg.baseURL || '')) {
+      headers['HTTP-Referer'] = location.origin;
+      headers['X-Title'] = 'itinerary-engine';
+    }
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       const r = await fetch(useProxy ? '/api/llm' : (this.cfg.baseURL.replace(/\/$/, '') + '/chat/completions'), {
         method: 'POST',
         headers,
+        signal: ctrl.signal,
         body: JSON.stringify(useProxy ? body : {
           model: this.cfg.model,
           messages,
@@ -127,13 +196,72 @@ const AI = {
         }),
       });
       const data = await r.json().catch(() => ({}));
-      if (useProxy) return data; // serve.py 已归一化 {ok, content, error}
+      if (useProxy) return this._explain(data); // serve.py 已归一化 {ok, content, error}
       const content = data.choices && data.choices[0] && data.choices[0].message
         ? (data.choices[0].message.content || '') : '';
-      if (!r.ok) return { ok: false, via: 'direct', error: `上游返回 ${r.status}：${JSON.stringify(data).slice(0, 300)}` };
+      if (!r.ok) return this._explain({ ok: false, via: 'direct', error: `上游返回 ${r.status}：${JSON.stringify(data).slice(0, 300)}` });
       return { ok: true, content, via: 'direct' };
     } catch (e) {
+      if (ctrl.signal.aborted) {
+        return { ok: false, via: useProxy ? 'proxy' : 'direct', timeout: true,
+          error: `AI 通道 ${Math.round(timeoutMs / 1000)} 秒无响应，已中断。推理模型（deepseek-r1 等）首轮思考较慢，可换更快的模型（deepseek-chat / V3），或在「AI 设置 → 测试连通」确认通道可用后重试。` };
+      }
       return { ok: false, via: useProxy ? 'proxy' : 'direct', error: `请求失败：${e.message}` };
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+
+  // 上游报错时补一句可行动提示：模型名失效是最常见、也最难自查的失败
+  _explain(res) {
+    if (!res || res.ok || !res.error) return res;
+    const msg = String(res.error);
+    if (/model/i.test(msg)
+      && /(not\s*(a\s*)?valid|not\s*found|unknown|invalid|does\s*not\s*exist|no\s*such|no\s*allowed\s*providers|不存在|不支持)/i.test(msg)) {
+      res.error = `${msg}\n\n提示：模型「${this.cfg.model}」在上游可能已下线或改名。点「获取可用模型」拉取实时列表后重新选择。`;
+    }
+    // OpenRouter 对"无法识别的 key"统一报 Missing Authentication header：
+    // key 与通道不匹配（如把 DeepSeek 的 key 填在 OpenRouter）、复制不完整，
+    // 或页面跑的还是旧版脚本（不发 Authorization 头），都会命中
+    if (/Missing Authentication header/i.test(msg) && this.cfg.key) {
+      res.error = `${msg}\n\n提示：上游没有认出你填的 key。① 确认 key 与所选通道匹配（OpenRouter 的 key 形如 sk-or-v1-…，DeepSeek / 硅基流动为 sk-…）；② 重新生成并完整复制 key；③ 强制刷新页面（Ctrl+Shift+R）排除旧版脚本缓存。`;
+    }
+    if (/(User not found|invalid_request_error|invalid api key|incorrect api key|authentication.?fails|token is invalid)/i.test(msg)) {
+      res.error = `${msg}\n\n提示：key 被上游判定为无效——请在上游控制台重新生成 key 并完整复制；确认账户有可用额度。`;
+    }
+    return res;
+  },
+
+  // 拉取上游实时模型列表（渠道模型名经常变动，靠它自查）
+  async listModels() {
+    const base = (this.cfg.baseURL || '').replace(/\/$/, '');
+    if (!base) return { ok: false, error: '先填 Base URL' };
+    const useProxy = !!this.server;
+    const headers = {};
+    if (this.cfg.key) {
+      if (useProxy) headers['X-Api-Key'] = this.cfg.key;
+      else headers['Authorization'] = `Bearer ${this.cfg.key}`;
+    }
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 25000);
+    try {
+      const r = useProxy
+        ? await fetch('/api/llm/models', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...headers },
+          signal: ctrl.signal,
+          body: JSON.stringify({ baseURL: base }),
+        })
+        : await fetch(base + '/models', { method: 'GET', headers, signal: ctrl.signal });
+      const data = await r.json().catch(() => ({}));
+      if (useProxy) return data;
+      if (!r.ok) return { ok: false, error: `上游返回 ${r.status}：${JSON.stringify(data).slice(0, 200)}` };
+      const ids = (data.data || []).map(m => m && m.id).filter(Boolean);
+      return { ok: true, models: ids };
+    } catch (e) {
+      return { ok: false, error: ctrl.signal.aborted ? '获取模型列表超时' : `请求失败：${e.message}` };
+    } finally {
+      clearTimeout(timer);
     }
   },
 
@@ -162,6 +290,17 @@ const AI = {
           `第 ${d.day} 天（${d.date}）：${d.stops.map(x => x.name).join(' → ') || '自由活动'}`);
         return `【离线演示 · 由页面内结构化行程数据汇总，未调用大模型】\n\n这份 ${s.days} 天的 ${s.from}→${s.to} 行程，城际选择了${s.intercity ? s.intercity.mode : '未选'}${s.intercity && s.intercity.board ? `（${s.intercity.board} 上车）` : ''}，全程约 ${s.total.minutes} 分钟、合计 ${s.total.cost} 元。\n\n${lines.join('\n')}\n\n（离线模式只能做事实汇总；配置 AI 通道后，会基于同一份行程 JSON 生成更自然的讲解、排序理由与贴士。）`;
       }
+    }
+    if (task === 'guide') {
+      // 演示攻略：与真实通道同构的 JSON，保证「AI 生成攻略」交互离线可测
+      return '{"food":[{"t":"演示美食条目","d":"离线演示数据：所在城市的热门街区 / 小吃类型（正式接入大模型后由 AI 生成）。"}],"stay":[{"t":"演示住宿条目","d":"按区域推荐：交通枢纽与景点之间的中价位选择。"}],"tips":[{"t":"演示贴士","d":"出行前自行核实营业时间与门票政策。"}],"ideas":[{"t":"演示行程","d":"第一天市区经典线，第二天周边放松线。"}]}';
+    }
+    if (task === 'qa') {
+      // 有检索结果时输出引用样式的演示回答，完整呈现「联网问答」交互
+      if (lastUser && lastUser.content.includes('网络检索结果')) {
+        return '【离线演示 · 联网问答】已检索到演示网页，并按引用格式作答：\n\n根据检索结果 [1][2]，可先看热门街区与经典线路，再按兴趣补充深度玩法；具体店名与价格建议出行前自行核实。\n\n（离线演示回答为预置文案；配置 AI 通道 + 真实搜索源后，这里将由大模型基于真实检索结果生成。）';
+      }
+      return '【离线演示回复】当前未配置 AI 通道。打开右上角「✨ AI 设置」接入 DeepSeek / OpenRouter 即可获得真实问答；本页攻略库中的条目可直接检索使用。';
     }
     if (task === 'nlplan') {
       return '【离线演示】解析结果（演示固定值，真实版由 LLM 解析任意语句）：\n{"city":"成都","days":3,"party":"朋友结伴","budget":2500,"interests":["热门","美食"]}\n\n离线模式也支持「城市 + N 天」的极简格式，例如：成都 3 天';

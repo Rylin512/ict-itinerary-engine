@@ -417,10 +417,14 @@ def ai_config():
             for frag, env in LLM_HOST_KEYS
         ],
         "fallbackReady": bool(os.environ.get("LLM_API_KEY")),
+        # 联网搜索：key 只报有无；demo 恒可用
+        "search": {p: bool(search_provider_key(p)) for p, _ in SEARCH_PROVIDER_KEYS} | {"demo": True},
     }
 
 
-def call_upstream(url, headers, payload, timeout=120):
+def call_upstream(url, headers, payload, timeout=60):
+    """60s 上限与前端 AI.chat 的默认超时对齐：推理模型太慢就快速失败，
+    避免页面"生成中"干等两分钟才报错（现场演示最伤观感）。"""
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -446,6 +450,153 @@ def handle_llm(body, headers_in):
     except (KeyError, IndexError, TypeError):
         return {"ok": False, "error": f"上游响应格式异常：{json.dumps(data, ensure_ascii=False)[:300]}"}
     return {"ok": True, "content": content, "usage": data.get("usage", {})}
+
+
+def handle_llm_models(body, headers_in):
+    """列出上游可用模型（GET {baseURL}/models）。
+
+    上游模型名会下线/改名（例如 OpenRouter 的 deepseek-r1:free 已移除），
+    让前端能拉实时列表，避免"key 是对的但模型不存在"这种无从排查的失败。
+    """
+    try:
+        base_url = (body.get("baseURL") or "").rstrip("/")
+        if not base_url:
+            raise ValueError("baseURL 必填")
+        if not llm_allowed_host(base_url):
+            raise ValueError(f"上游 {base_url} 不在白名单内")
+        key = resolve_llm_key(base_url, headers_in.get("X-Api-Key"))
+        if not key:
+            raise ValueError("未找到 API key：请在前端填写，或为 serve.py 设置对应环境变量")
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    req = urllib.request.Request(
+        base_url + "/models",
+        headers={"Authorization": f"Bearer {key}"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:300]
+        return {"ok": False, "error": f"上游返回 {exc.code}：{detail}"}
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return {"ok": False, "error": f"上游连接失败：{exc}"}
+    items = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return {"ok": False, "error": f"上游响应格式异常：{json.dumps(data, ensure_ascii=False)[:200]}"}
+    ids = [m.get("id") for m in items if isinstance(m, dict) and m.get("id")]
+    return {"ok": True, "models": ids}
+
+
+# ================= 联网搜索代理（博查 / Tavily，供 AI 攻略问答引用实时网页） =================
+# 国内大模型式"联网搜索"：AI 回答前先检索，回答下方列出可点击来源。
+# key：请求头 X-Search-Key > 环境变量 BOCHA_API_KEY / TAVILY_API_KEY。
+
+SEARCH_PROVIDER_KEYS = [
+    ("bocha", "BOCHA_API_KEY"),
+    ("tavily", "TAVILY_API_KEY"),
+]
+
+
+def search_provider_key(provider, header_key=None):
+    if header_key:
+        return header_key
+    return os.environ.get(dict(SEARCH_PROVIDER_KEYS).get(provider, ""), None)
+
+
+def build_search_request(provider, key, query, count=6):
+    """整理对搜索上游的 (url, headers, payload)，纯函数便于单测。"""
+    query = (query or "").strip()
+    if not query:
+        raise ValueError("query 必填")
+    if provider == "bocha":
+        if not _extra_host_ok("api.bochaai.com"):
+            raise ValueError("上游 api.bochaai.com 不在白名单内")
+        return ("https://api.bochaai.com/v1/web-search",
+                {"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+                {"query": query, "count": int(count), "summary": True, "freshness": "noLimit"})
+    if provider == "tavily":
+        if not _extra_host_ok("api.tavily.com"):
+            raise ValueError("上游 api.tavily.com 不在白名单内")
+        return ("https://api.tavily.com/search",
+                {"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+                {"query": query, "max_results": int(count)})
+    raise ValueError(f"未知搜索源：{provider}")
+
+
+def _extra_host_ok(host):
+    extra = [h.strip().lower() for h in os.environ.get("SEARCH_ALLOWED_HOSTS", "").split(",") if h.strip()]
+    allowed = ["api.bochaai.com", "api.tavily.com"] + extra
+    return any(host == h or host.endswith("." + h) for h in allowed)
+
+
+def parse_search_response(provider, data):
+    """把上游响应归一化为 [{title,url,snippet}]，纯函数便于单测。"""
+    out = []
+    if provider == "bocha":
+        pages = ((data.get("data") or {}).get("webPages") or {}).get("value") or []
+        for p in pages:
+            if isinstance(p, dict) and p.get("url"):
+                out.append({"title": p.get("name") or "", "url": p["url"],
+                            "snippet": p.get("summary") or p.get("snippet") or ""})
+    elif provider == "tavily":
+        for p in data.get("results") or []:
+            if isinstance(p, dict) and p.get("url"):
+                out.append({"title": p.get("title") or "", "url": p["url"],
+                            "snippet": p.get("content") or ""})
+    return out
+
+
+def demo_search_results(query, count):
+    """离线演示搜索源：无需任何 key，返回预置检索结果（明确标注演示）。
+    用于答辩断网兜底 / 未注册搜索 key 时体验完整的联网问答交互。"""
+    q = (query or "").strip() or "旅游"
+    results = [
+        {"title": f"【演示】{q} 精选推荐", "url": "https://www.example.com/demo-search/1",
+         "snippet": f"关于「{q}」的演示检索摘要：本地预置数据，无需联网与 key 即可体验"
+                    "「检索提示 → 引用标注 → 来源链接」的完整联网问答交互。"},
+        {"title": f"【演示】{q} 实用指南", "url": "https://www.example.com/demo-search/2",
+         "snippet": "演示摘要：通用区域 / 类型建议。正式接入博查 / Tavily 后，"
+                    "这里将展示真实搜索引擎返回的内容。"},
+        {"title": f"【演示】{q} 常见问答", "url": "https://www.example.com/demo-search/3",
+         "snippet": "演示摘要：本条用于验证来源列表的展示与跳转（点击为示例链接）。"},
+    ]
+    return results[:max(1, min(int(count or 3), len(results)))]
+
+
+def handle_web_search(body, headers_in):
+    provider = (body.get("provider") or "auto").lower()
+    try:
+        query = body.get("query") or ""
+        count = min(max(int(body.get("count") or 6), 1), 10)
+        if provider == "demo":
+            return {"ok": True, "provider": "demo", "results": demo_search_results(query, count)}
+        if provider == "auto":
+            provider = next((p for p, env in SEARCH_PROVIDER_KEYS
+                             if search_provider_key(p, headers_in.get("X-Search-Key"))), None)
+            if not provider:
+                return {"ok": False, "error": "未配置联网搜索：请在页面填搜索 key，或为 serve.py 设置 BOCHA_API_KEY / TAVILY_API_KEY 环境变量；也可把搜索源切到「离线演示」直接体验"}
+        key = search_provider_key(provider, headers_in.get("X-Search-Key"))
+        if not key:
+            return {"ok": False, "error": f"搜索源 {provider} 未配置 key（页面填写或环境变量）"}
+        url, headers, payload = build_search_request(provider, key, query, count)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "参数错误"}
+    try:
+        data = call_upstream(url, headers, payload, timeout=15)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:300]
+        return {"ok": False, "error": f"搜索上游返回 {exc.code}：{detail}"}
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return {"ok": False, "error": f"搜索上游连接失败：{exc}"}
+    try:
+        results = parse_search_response(provider, data)
+    except (AttributeError, TypeError):
+        return {"ok": False, "error": f"搜索响应格式异常：{json.dumps(data, ensure_ascii=False)[:200]}"}
+    return {"ok": True, "provider": provider, "results": results}
 
 
 # ================= 百度地图开放平台代理（地点检索 + 多模式路线规划） =================
@@ -2011,10 +2162,15 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         try:
             n = int(self.headers.get("Content-Length", 0) or 0)
-            body = json.loads(self.rfile.read(n) or b"{}")
+            # errors="replace"：浏览器恒为 UTF-8；编码错误的 CLI 测试也不会 500
+            body = json.loads(self.rfile.read(n).decode("utf-8", errors="replace") or "{}")
             path = self.path.split("?")[0]
             if path == "/api/llm":
                 return self._send(handle_llm(body, self.headers))
+            if path == "/api/llm/models":
+                return self._send(handle_llm_models(body, self.headers))
+            if path == "/api/web-search":
+                return self._send(handle_web_search(body, self.headers))
             if path == "/api/baidu/place":
                 return self._send(handle_baidu_place(body, self.headers))
             if path == "/api/baidu/suggest":

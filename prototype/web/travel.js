@@ -431,8 +431,15 @@ async function ensureRoutes() { // 批量拉真实路网，回来后按当前步
     }),
   );
   if (seqId !== routesSeq) return;
-  results.forEach(([key, est]) => { if (est) routeEst.set(key, est); });
-  refreshAutoModes();
+  let added = 0;
+  results.forEach(([key, est]) => { if (est) { routeEst.set(key, est); added++; } });
+  // 新估算 / 可达性变化后重算「自动」方式（只改 state.modes，不触发渲染）
+  const modesChanged = refreshAutoModes();
+  // 关键护栏：本轮没有任何新估算、方式也没变时，绝不能再触发重渲染。
+  // renderTimeline 末尾会调 ensureRoutes，若这里照旧 rebuildAccess+renderTimeline，
+  // 而缺失 pair 永远拿不到结果（如未选城际交通时 est 恒为 null），
+  // 就会形成 renderTimeline→ensureRoutes→renderTimeline 的微任务死循环，页面瞬间冻死。
+  if (!added && !modesChanged) return;
   rebuildAccess();
   if (state.step === 2) renderTransport();
   if (state.step >= 4) { renderTimeline(); drawRoute(false); }
@@ -2659,43 +2666,75 @@ function renderGuide() {
 }
 
 async function aiGenGuide() {
-  if (!aiGuard()) return;
-  const city = state.to.name;
-  $('#guideGen').textContent = '生成中…';
-  const messages = [
-    { role: 'system', content: '你是旅行攻略编辑。为目的地城市生成简明攻略 JSON：{"food":[{"t":"条目名","d":"两句话说明"}],"stay":[...],"tips":[...],"ideas":[{"t":"行程名","d":"按天一句话"}]}。food/stay/tips 各 3-4 条，ideas 1-2 条；内容基于你的公开常识，不要编造具体店名价格，用「区域/类型」表述；只输出 JSON。' },
-    { role: 'user', content: `目的地：${city}` },
-  ];
-  const r = await AI.chat(messages, { task: 'guide', temperature: 0.5, maxTokens: 1200 });
-  $('#guideGen').textContent = '让 AI 生成该城市攻略';
-  if (!r.ok) return toast(`生成失败：${r.error.slice(0, 80)}`);
-  const data = AI.extractJSON(r.content);
-  if (!data || !data.food) return toast('AI 返回内容无法解析为攻略，请重试');
-  data.food = (data.food || []).map(i => ({ ...i, src: 'AI 生成，仅供参考' }));
-  data.stay = (data.stay || []).map(i => ({ ...i, src: 'AI 生成，仅供参考' }));
-  data.tips = (data.tips || []).map(i => ({ ...i, src: 'AI 生成，仅供参考' }));
-  data.ideas = (data.ideas || []).map(i => ({ ...i, src: 'AI 生成，仅供参考' }));
-  localStorage.setItem(GUIDE_LS(city), JSON.stringify(data));
-  renderGuide();
-  toast(`已生成「${city}」攻略（存本机缓存）`);
+  if (!aiGuard() || !aiBegin()) return;
+  try {
+    const city = state.to.name;
+    $('#guideGen').textContent = AI.searchReady() ? '联网检索并生成中…' : '生成中…';
+    // 联网检索目的地攻略，让生成内容有真实依据
+    let webBlock = '';
+    let searchNote = '';
+    const sr = await tryWebSearch(`${city} 旅游攻略 美食 住宿 必玩`, 6);
+    if (sr.ok && sr.results.length) {
+      searchNote = `🔍 已联网检索 ${sr.results.length} 条网页（搜索源：${AI.searchProviderLabel(sr.provider)}）\n\n`;
+      webBlock = `\n\n网络检索结果（生成时可参考其中的真实区域/类型，但不要照抄具体店名和价格）：\n`
+        + sr.results.map((s, i) => `[${i + 1}] ${s.title}\n${s.snippet}\n来源：${s.url}`).join('\n\n');
+    }
+    const messages = [
+      { role: 'system', content: '你是旅行攻略编辑。为目的地城市生成简明攻略 JSON：{"food":[{"t":"条目名","d":"两句话说明"}],"stay":[...],"tips":[...],"ideas":[{"t":"行程名","d":"按天一句话"}]}。food/stay/tips 各 3-4 条，ideas 1-2 条；内容基于你的公开常识与给定的网络检索结果，不要编造具体店名价格，用「区域/类型」表述；只输出 JSON。' },
+      { role: 'user', content: `目的地：${city}${webBlock}` },
+    ];
+    const r = await AI.chat(messages, { task: 'guide', temperature: 0.5, maxTokens: 1200 });
+    $('#guideGen').textContent = '让 AI 生成该城市攻略';
+    // 失败时用输出弹窗展示完整报错：toast 会截断模型下线等关键提示
+    if (!r.ok) return openAiOut(searchNote + '⚠ 攻略生成失败', r.error);
+    const data = AI.extractJSON(r.content);
+    if (!data || !data.food) return toast('AI 返回内容无法解析为攻略，请重试');
+    const srcTag = sr.ok && sr.results.length
+      ? `AI 生成 · 联网参考 ${sr.results.length} 个网页，仅供参考`
+      : 'AI 生成，仅供参考';
+    data.food = (data.food || []).map(i => ({ ...i, src: srcTag }));
+    data.stay = (data.stay || []).map(i => ({ ...i, src: srcTag }));
+    data.tips = (data.tips || []).map(i => ({ ...i, src: srcTag }));
+    data.ideas = (data.ideas || []).map(i => ({ ...i, src: srcTag }));
+    localStorage.setItem(GUIDE_LS(city), JSON.stringify(data));
+    renderGuide();
+    toast(`已生成「${city}」攻略（${sr.ok && sr.results.length ? '联网参考，' : ''}存本机缓存）`);
+  } finally {
+    aiEnd();
+  }
 }
 
 async function guideAsk() {
   const q = $('#guideQ').value.trim();
   if (!q) return toast('输入问题，比如「住哪个区域」「必吃什么」');
-  if (!aiGuard()) return;
-  const city = state.to.name;
-  const ctx = retrieveGuide(city, q);
-  const ctxText = ctx.map(i => `- [${i.cat}] ${i.t}：${i.d}（${i.src}）`).join('\n') || '（攻略库暂无该城市条目）';
-  const pois = (POIS[city] || []).map(p => `${p.name}（${tierLabel(p.tier)}；${p.note || ''}）`).join('；') || '（该城市暂无景点数据）';
-  openAiOut('🤖 目的地问答', '检索攻略库并生成回答…');
-  const messages = [
-    { role: 'system', content: '你是目的地攻略问答助手。只允许基于给定条目回答；引用条目时注明来源；条目里没有的信息直说「攻略库里没有，建议出行前自行核实」，禁止编造店名/价格/时刻。用中文简洁回答。' },
-    { role: 'user', content: `问题：${q}\n\n攻略库检索条目：\n${ctxText}\n\n已收录景点备注：\n${pois}` },
-  ];
-  const r = await AI.chat(messages, { task: 'qa', temperature: 0.4 });
-  setAiOut((r.ok ? r.content : `❌ ${r.error}`)
-    + `\n\n—— 检索命中 ${ctx.length} 条攻略条目${AI.cfg.provider === 'demo' ? '（离线演示模式未调用大模型）' : ''}`);
+  if (!aiGuard() || !aiBegin()) return;
+  try {
+    const city = state.to.name;
+    const ctx = retrieveGuide(city, q);
+    const ctxText = ctx.map(i => `- [${i.cat}] ${i.t}：${i.d}（${i.src}）`).join('\n') || '（攻略库暂无该城市条目）';
+    const pois = (POIS[city] || []).map(p => `${p.name}（${tierLabel(p.tier)}；${p.note || ''}）`).join('；') || '（该城市暂无景点数据）';
+    openAiOut('🤖 目的地问答', AI.searchReady() ? '联网检索中…' : '检索攻略库并生成回答…');
+    // 联网搜索：先检索实时网页，再把命中条目喂给 AI 作答（国内大模型式"联网 + 引用来源"）
+    let sources = [];
+    let searchNote = '';
+    let webBlock = '';
+    const sr = await tryWebSearch(`${city} ${q}`, 6);
+    if (sr.ok && sr.results.length) {
+      sources = sr.results;
+      searchNote = `🔍 已联网检索 ${sources.length} 条网页（搜索源：${AI.searchProviderLabel(sr.provider)}）\n\n`;
+      webBlock = `\n\n网络检索结果（信息较新，可优先引用；引用时标注 [序号]，不要编造检索结果里没有的店名/价格）：\n`
+        + sources.map((s, i) => `[${i + 1}] ${s.title}\n${s.snippet}\n来源：${s.url}`).join('\n\n');
+    }
+    const messages = [
+      { role: 'system', content: '你是目的地攻略问答助手。优先基于「网络检索结果」回答并标注 [序号] 来源；没有检索结果或检索不足时基于给定攻略条目回答并注明来源；条目和检索里都没有的信息直说「建议出行前自行核实」，禁止编造店名/价格/时刻。用中文简洁回答。' },
+      { role: 'user', content: `问题：${q}\n\n攻略库检索条目：\n${ctxText}\n\n已收录景点备注：\n${pois}${webBlock}` },
+    ];
+    const r = await AI.chat(messages, { task: 'qa', temperature: 0.4, maxTokens: sources.length ? 800 : 600 });
+    setAiOut(searchNote + (r.ok ? r.content : `❌ ${r.error}`)
+      + `\n\n—— 攻略库命中 ${ctx.length} 条${AI.cfg.provider === 'demo' ? '（离线演示模式未调用大模型）' : ''}`, sources);
+  } finally {
+    aiEnd();
+  }
 }
 
 /* ================= AI 功能（通道见 ai.js；LLM 只转述结构化事实） ================= */
@@ -2707,6 +2746,15 @@ function aiGuard() {
   return false;
 }
 
+// 防重复：AI 请求可能长达数十秒，连点会并发排队多个请求，输出框互相覆盖且更慢
+let aiBusy = false;
+function aiBegin() {
+  if (aiBusy) { toast('AI 正在处理上一个请求，请等它完成（或点 ✕ 关闭后重试）'); return false; }
+  aiBusy = true;
+  return true;
+}
+function aiEnd() { aiBusy = false; }
+
 function openAiSettings() {
   $('#aiProvider').innerHTML = Object.entries(AI_PROVIDERS)
     .map(([k, p]) => `<option value="${k}">${p.label}</option>`).join('');
@@ -2715,6 +2763,16 @@ function openAiSettings() {
   $('#aiModel').value = AI.cfg.model || AI_PROVIDERS[AI.cfg.provider].model || '';
   $('#aiKey').value = AI.cfg.key || '';
   $('#aiProviderHint').textContent = AI_PROVIDERS[AI.cfg.provider].hint;
+  // 每次打开重置模型列表与提示，避免看到上一个通道的旧候选
+  const modelList = $('#aiModelList');
+  if (modelList) modelList.innerHTML = '';
+  const modelHint = $('#aiModelHint');
+  if (modelHint) modelHint.textContent = '上游模型名会下线或改名（如 OpenRouter 的免费 R1 已移除）；填好 key 后点「获取可用模型」拉取当前可用列表。';
+  // 联网搜索设置回显
+  $('#webSearchOn').value = AI.cfg.searchOn ? 'on' : 'off';
+  $('#webSearchProvider').value = AI.cfg.searchProvider || 'auto';
+  $('#webSearchKey').value = AI.cfg.searchKey || '';
+  $('#webSearchStatus').textContent = AI.searchStatusText();
   // 演示模式不需要任何凭据：隐藏真实通道字段，避免"填了却不生效"的误导
   $('#aiRealFields').classList.toggle('hidden', AI.cfg.provider === 'demo');
   $('#baiduAk').value = BAIDU.key || '';
@@ -2774,12 +2832,91 @@ async function saveCacheConfig() {
   }
 }
 
-async function testAi() {
-  $('#aiStatus').textContent = '测试连通中…';
-  const r = await AI.chat([{ role: 'user', content: '收到请只回复：ok' }], { task: 'test', maxTokens: 8 });
-  $('#aiStatus').textContent = r.ok
-    ? `✅ 连通正常（${r.via === 'demo' ? '离线演示' : r.via === 'proxy' ? '本地代理' : '直连'}）`
-    : `❌ ${r.error}`;
+// 用设置面板里「当前填的」值临时替换 AI.cfg 执行动作：
+// 用户填完 key 直接点测试/取模型时，不该还在用上次保存的旧配置。
+async function withFormCfg(fn) {
+  const prev = { cfg: AI.cfg, server: AI.server };
+  AI.cfg = {
+    provider: $('#aiProvider').value || AI.cfg.provider,
+    baseURL: ($('#aiBaseURL').value || '').trim(),
+    model: ($('#aiModel').value || '').trim(),
+    key: ($('#aiKey').value || '').trim(),
+  };
+  try {
+    return await fn();
+  } finally {
+    AI.cfg = prev.cfg;
+    AI.server = prev.server;
+  }
+}
+
+// 拉取上游实时模型列表，填进 datalist 供输入框下拉选择
+async function fetchAiModels() {
+  const btn = $('#aiModelFetch');
+  const hint = $('#aiModelHint');
+  const status = $('#aiStatus');
+  const formModel = ($('#aiModel').value || '').trim();
+  if (!($('#aiBaseURL').value || '').trim()) return toast('先填 Base URL');
+  if (btn) { btn.disabled = true; btn.textContent = '获取中…'; }
+  try {
+    const r = await withFormCfg(() => AI.listModels());
+    if (!r.ok) {
+      if (hint) hint.textContent = `获取失败：${String(r.error || '').slice(0, 200)}`;
+      return;
+    }
+    const models = r.models || [];
+    const list = $('#aiModelList');
+    if (list) list.innerHTML = models.map(id => `<option value="${esc(id)}"></option>`).join('');
+    if (hint) {
+      hint.textContent = models.length
+        ? `已拉取 ${models.length} 个模型，点模型输入框下拉选择。`
+        : '上游返回了空列表，请确认 key 的权限。';
+    }
+    // 当前模型不在列表里就明确提示（大概率已下线）
+    if (models.length && formModel && !models.includes(formModel) && status) {
+      status.textContent = `⚠ 当前模型「${formModel}」不在可用列表中，请重新选择`;
+    }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '获取可用模型'; }
+  }
+}
+
+// 用设置面板里当前填写的搜索配置做一次真实检索，验证通道
+async function testWebSearch() {
+  const status = $('#webSearchStatus');
+  const prev = { cfg: AI.cfg, server: AI.server };
+  AI.cfg = {
+    ...AI.cfg,
+    searchOn: $('#webSearchOn').value === 'on',
+    searchProvider: $('#webSearchProvider').value,
+    searchKey: ($('#webSearchKey').value || '').trim(),
+  };
+  const btn = $('#webSearchTest');
+  if (btn) { btn.disabled = true; btn.textContent = '测试中…'; }
+  try {
+    if (!$('#webSearchOn').value) { /* 控件未渲染时兜底 */ }
+    const r = await AI.webSearch('成都 美食', 3);
+    status.textContent = r.ok && r.results.length
+      ? `✅ 联网搜索正常（${r.provider === 'bocha' ? '博查' : 'Tavily'}，返回 ${r.results.length} 条测试结果）`
+      : `❌ ${r.error || '未返回结果'}`;
+  } finally {
+    AI.cfg = prev.cfg;
+    AI.server = prev.server;
+    if (btn) { btn.disabled = false; btn.textContent = '测试联网搜索'; }
+  }
+}
+
+async function testAi() {  if (!aiBegin()) return;
+  try {
+    $('#aiStatus').textContent = '测试连通中…';
+    const r = await withFormCfg(() =>
+      AI.chat([{ role: 'user', content: '收到请只回复：ok' }], { task: 'test', maxTokens: 8, timeoutMs: 20000 }));
+    $('#aiStatus').textContent = r.ok
+      ? `✅ 连通正常（${r.via === 'demo' ? '离线演示' : r.via === 'proxy' ? '本地代理' : '直连'}）`
+      : `❌ ${r.error}`;
+  } finally {
+    aiEnd();
+  }
 }
 
 function openAiOut(title, body) {
@@ -2788,9 +2925,29 @@ function openAiOut(title, body) {
   $('#aiOutBody').classList.add('loading');
   $('#aiOut').classList.remove('hidden');
 }
-function setAiOut(text) {
-  $('#aiOutBody').textContent = text;
+function setAiOut(text, sources) {
+  const el = $('#aiOutBody');
+  el.textContent = text;
   $('#aiOutBody').classList.remove('loading');
+  // 联网检索来源：回答下方列出可点击链接（像国内大模型的"引用来源"）
+  const old = el.querySelector('.ai-src');
+  if (old) old.remove();
+  if (sources && sources.length) {
+    const box = document.createElement('div');
+    box.className = 'ai-src';
+    box.innerHTML = '<div class="ai-src-head">🔗 来源（点击查看原文）</div>'
+      + sources.map((s, i) =>
+        `<a href="${esc(s.url)}" target="_blank" rel="noopener">[${i + 1}] ${esc(s.title || s.url)}</a>`).join('');
+    el.appendChild(box);
+  }
+}
+
+// 联网检索：AI.cfg.searchOn 开启且 serve.py 在线时检索，返回 {ok, results} 或 {ok:false}
+async function tryWebSearch(query, count = 6) {
+  if (!AI.searchReady()) return { ok: false, skipped: true, error: AI.searchStatusText() };
+  const r = await AI.webSearch(query, count);
+  if (!r.ok) toast(`联网搜索不可用，已跳过：${String(r.error || '').slice(0, 60)}`);
+  return r;
 }
 
 function buildPlanJSON() { // 只打包结构化事实给 LLM，遵守"表达层禁止新增事实"
@@ -2839,16 +2996,20 @@ function buildPlanJSON() { // 只打包结构化事实给 LLM，遵守"表达层
 }
 
 async function aiExplain() {
-  if (!aiGuard()) return;
-  if (!getOrder().flat().length) return toast('请先生成行程方案');
-  openAiOut('🤖 AI 行程讲解', '基于结构化行程生成讲解…');
-  const messages = [
-    { role: 'system', content: '你是行程讲解助手，用户给你一份结构化行程 JSON。硬性规则：只允许转述 JSON 里出现过的地点、时刻、金额、交通方式，禁止新增任何地点/车次/时刻/价格；用中文；先总述（天数/城际/总花费），再逐天讲为什么这样排（只能引用 JSON 里的 note 与顺序关系），最后给 2-3 条贴士（只能来自 note 字段）。' },
-    { role: 'user', content: JSON.stringify(buildPlanJSON()) },
-  ];
-  const r = await AI.chat(messages, { task: 'explain', temperature: 0.4 });
-  setAiOut((r.ok ? r.content : `❌ ${r.error}`)
-    + (AI.cfg.provider === 'demo' ? '\n\n（离线演示模式：内容由页面内结构化数据汇总生成，未调用大模型）' : ''));
+  if (!aiGuard() || !aiBegin()) return;
+  try {
+    if (!getOrder().flat().length) return toast('请先生成行程方案');
+    openAiOut('🤖 AI 行程讲解', '基于结构化行程生成讲解…');
+    const messages = [
+      { role: 'system', content: '你是行程讲解助手，用户给你一份结构化行程 JSON。硬性规则：只允许转述 JSON 里出现过的地点、时刻、金额、交通方式，禁止新增任何地点/车次/时刻/价格；用中文；先总述（天数/城际/总花费），再逐天讲为什么这样排（只能引用 JSON 里的 note 与顺序关系），最后给 2-3 条贴士（只能来自 note 字段）。' },
+      { role: 'user', content: JSON.stringify(buildPlanJSON()) },
+    ];
+    const r = await AI.chat(messages, { task: 'explain', temperature: 0.4, maxTokens: 800 });
+    setAiOut((r.ok ? r.content : `❌ ${r.error}`)
+      + (AI.cfg.provider === 'demo' ? '\n\n（离线演示模式：内容由页面内结构化数据汇总生成，未调用大模型）' : ''));
+  } finally {
+    aiEnd();
+  }
 }
 
 /* ================= AI 景点编排 =================
@@ -3087,27 +3248,31 @@ function nlParseLocal(text) { // 离线兜底：只识别「城市 + N 天」
 async function aiNLPlan() {
   const text = $('#nlInput').value.trim();
   if (!text) return toast('先描述需求，例：下周去成都玩 3 天，预算 3000');
-  if (!aiGuard()) return;
-  let slots = null;
-  if (AI.cfg.provider === 'demo') {
-    slots = nlParseLocal(text);
-    if (!slots) {
-      openAiOut('✨ 一句话规划', '离线模式只支持「城市 + 天数」格式（例：成都 3 天）。配置 AI 通道后可解析任意描述。');
-      return;
+  if (!aiGuard() || !aiBegin()) return;
+  try {
+    let slots = null;
+    if (AI.cfg.provider === 'demo') {
+      slots = nlParseLocal(text);
+      if (!slots) {
+        openAiOut('✨ 一句话规划', '离线模式只支持「城市 + 天数」格式（例：成都 3 天）。配置 AI 通道后可解析任意描述。');
+        return;
+      }
+    } else {
+      openAiOut('✨ 一句话规划', '解析需求中…');
+      const today = fmtISO(new Date());
+      const messages = [
+        { role: 'system', content: `把用户的一句旅行需求解析成 JSON，字段：city（中国地级市名，不带"市"后缀）、days（整数）、start_date（YYYY-MM-DD；今天是 ${today}，"下周/明天"等相对日期据此推算，无法确定则 null）、party（同行人描述或 null）、budget（每人预算数字或 null）、interests（兴趣标签数组，可为空数组）。只输出 JSON。` },
+        { role: 'user', content: text },
+      ];
+      const r = await AI.chat(messages, { task: 'nlplan', temperature: 0.1, maxTokens: 300 });
+      if (!r.ok) return setAiOut(`❌ ${r.error}`);
+      slots = AI.extractJSON(r.content);
+      if (!slots) return setAiOut('没能从回复里解析出 JSON，原始回复：\n' + r.content.slice(0, 500));
     }
-  } else {
-    openAiOut('✨ 一句话规划', '解析需求中…');
-    const today = fmtISO(new Date());
-    const messages = [
-      { role: 'system', content: `把用户的一句旅行需求解析成 JSON，字段：city（中国地级市名，不带"市"后缀）、days（整数）、start_date（YYYY-MM-DD；今天是 ${today}，"下周/明天"等相对日期据此推算，无法确定则 null）、party（同行人描述或 null）、budget（每人预算数字或 null）、interests（兴趣标签数组，可为空数组）。只输出 JSON。` },
-      { role: 'user', content: text },
-    ];
-    const r = await AI.chat(messages, { task: 'nlplan', temperature: 0.1, maxTokens: 300 });
-    if (!r.ok) return setAiOut(`❌ ${r.error}`);
-    slots = AI.extractJSON(r.content);
-    if (!slots) return setAiOut('没能从回复里解析出 JSON，原始回复：\n' + r.content.slice(0, 500));
+    applySlots(slots, text);
+  } finally {
+    aiEnd();
   }
-  applySlots(slots, text);
 }
 
 function applySlots(slots, rawText) {
@@ -3867,6 +4032,8 @@ function bind() {
     $('#aiModel').value = p.model || '';
     $('#aiProviderHint').textContent = p.hint;
     $('#aiRealFields').classList.toggle('hidden', p === AI_PROVIDERS.demo);
+    const list = $('#aiModelList');
+    if (list) list.innerHTML = '';   // 换通道后旧模型候选作废
   });
   $('#aiSave').addEventListener('click', () => {
     const provider = $('#aiProvider').value;
@@ -3876,6 +4043,9 @@ function bind() {
       baseURL: provider === 'demo' ? '' : $('#aiBaseURL').value.trim(),
       model: provider === 'demo' ? '' : $('#aiModel').value.trim(),
       key: provider === 'demo' ? '' : $('#aiKey').value.trim(),
+      searchOn: $('#webSearchOn').value === 'on',
+      searchProvider: $('#webSearchProvider').value,
+      searchKey: $('#webSearchKey').value.trim(),
     };
     AI.save();
     const browserAkChanged = BAIDU.browserKey !== $('#baiduAkBrowser').value.trim();
@@ -3906,11 +4076,28 @@ function bind() {
     if (MAPS.available()) ensureRoutes(); // 新 AK 立刻升级路网估算
   });
   $('#aiTest').addEventListener('click', testAi);
+  const modelBtn = $('#aiModelFetch');
+  if (modelBtn) modelBtn.addEventListener('click', fetchAiModels);
+  const wsBtn = $('#webSearchTest');
+  if (wsBtn) wsBtn.addEventListener('click', testWebSearch);
+  ['webSearchOn', 'webSearchProvider'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', () => {
+      AI.cfg.searchOn = $('#webSearchOn').value === 'on';
+      AI.cfg.searchProvider = $('#webSearchProvider').value;
+      $('#webSearchStatus').textContent = AI.searchStatusText();
+    });
+  });
   $$('#aiModal [data-close], #aiOut [data-close]').forEach(b =>
     b.addEventListener('click', () => b.closest('.modal').classList.add('hidden')));
-  $$('.modal').forEach(m => m.addEventListener('click', e => {
-    if (e.target === m) m.classList.add('hidden');
-  }));
+  // 点遮罩关闭：按下与松开都在遮罩上才算。在输入框里拖选/长按文字时手指滑出
+  // 边界、click 落在遮罩上（手机全选 API key 时高发），不能把弹窗关掉。
+  $$('.modal').forEach(m => {
+    m.addEventListener('pointerdown', e => { m._downOnBackdrop = (e.target === m); });
+    m.addEventListener('click', e => {
+      if (e.target === m && m._downOnBackdrop) m.classList.add('hidden');
+    });
+  });
 
   // AI 讲解 / 一句话规划
   $('#btnExplain').addEventListener('click', aiExplain);
