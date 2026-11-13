@@ -68,6 +68,7 @@ ROUTE_TTL = None
 ROUTE_CACHE_VERSION = 3  # 3：坐标按 4 位小数归一化后再做键，旧键自然失效
 FREE_PLACE_TTL = 30 * 86400
 FREE_POI_TTL = 7 * 86400
+SEARCH_TTL = 6 * 3600  # 联网搜索结果：同一 query 6 小时内不重复计费
 FREE_MIN_INTERVAL = 1.0  # Nominatim / Overpass 公共服务的礼貌间隔（≤1 次/秒）
 _CACHE = None  # 兼容旧测试：置 None 后下次访问会重新打开数据库
 _DB = None
@@ -496,6 +497,7 @@ def handle_llm_models(body, headers_in):
 SEARCH_PROVIDER_KEYS = [
     ("bocha", "BOCHA_API_KEY"),
     ("tavily", "TAVILY_API_KEY"),
+    ("deepseek", "DEEPSEEK_API_KEY"),   # DeepSeek 官方 Search API（按成功请求计费）
 ]
 
 
@@ -522,12 +524,19 @@ def build_search_request(provider, key, query, count=6):
         return ("https://api.tavily.com/search",
                 {"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
                 {"query": query, "max_results": int(count)})
+    if provider == "deepseek":
+        if not _extra_host_ok("api.deepseek.com"):
+            raise ValueError("上游 api.deepseek.com 不在白名单内")
+        # 官方 Search API：https://api-docs.deepseek.com/guides/search
+        return ("https://api.deepseek.com/v1/tools/search",
+                {"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+                {"query": query, "count": int(count), "need_content": False})
     raise ValueError(f"未知搜索源：{provider}")
 
 
 def _extra_host_ok(host):
     extra = [h.strip().lower() for h in os.environ.get("SEARCH_ALLOWED_HOSTS", "").split(",") if h.strip()]
-    allowed = ["api.bochaai.com", "api.tavily.com"] + extra
+    allowed = ["api.bochaai.com", "api.tavily.com", "api.deepseek.com"] + extra
     return any(host == h or host.endswith("." + h) for h in allowed)
 
 
@@ -545,6 +554,12 @@ def parse_search_response(provider, data):
             if isinstance(p, dict) and p.get("url"):
                 out.append({"title": p.get("title") or "", "url": p["url"],
                             "snippet": p.get("content") or ""})
+    elif provider == "deepseek":
+        # 官方 Search 回包：results[] 里 summary 是给模型读的长摘要，snippet 给 UI
+        for p in data.get("results") or []:
+            if isinstance(p, dict) and p.get("url"):
+                out.append({"title": p.get("title") or "", "url": p["url"],
+                            "snippet": p.get("summary") or p.get("snippet") or ""})
     return out
 
 
@@ -576,10 +591,15 @@ def handle_web_search(body, headers_in):
             provider = next((p for p, env in SEARCH_PROVIDER_KEYS
                              if search_provider_key(p, headers_in.get("X-Search-Key"))), None)
             if not provider:
-                return {"ok": False, "error": "未配置联网搜索：请在页面填搜索 key，或为 serve.py 设置 BOCHA_API_KEY / TAVILY_API_KEY 环境变量；也可把搜索源切到「离线演示」直接体验"}
+                return {"ok": False, "error": "未配置联网搜索：请在页面填搜索 key，或为 serve.py 设置 BOCHA_API_KEY / TAVILY_API_KEY / DEEPSEEK_API_KEY 环境变量；也可把搜索源切到「离线演示」直接体验"}
         key = search_provider_key(provider, headers_in.get("X-Search-Key"))
         if not key:
             return {"ok": False, "error": f"搜索源 {provider} 未配置 key（页面填写或环境变量）"}
+        # 搜索结果按 query 缓存：同一句话重复问不重复计费（Search 按成功请求收费）
+        ck = cache_key("web_search", [provider, query.strip(), count])
+        hit = cache_get("web_search", ck, SEARCH_TTL)
+        if hit is not None:
+            return {"ok": True, "provider": provider, "results": hit, "cached": True}
         url, headers, payload = build_search_request(provider, key, query, count)
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
@@ -596,6 +616,8 @@ def handle_web_search(body, headers_in):
         results = parse_search_response(provider, data)
     except (AttributeError, TypeError):
         return {"ok": False, "error": f"搜索响应格式异常：{json.dumps(data, ensure_ascii=False)[:200]}"}
+    if results:
+        cache_set("web_search", ck, results)
     return {"ok": True, "provider": provider, "results": results}
 
 

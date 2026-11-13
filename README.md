@@ -66,7 +66,7 @@ python serve.py --host 0.0.0.0
 | `AMAP_MAP_KEY` / `AMAP_BROWSER_KEY` | 高德服务端 / 浏览器端 Key |
 | `DEEPSEEK_API_KEY`、`OPENROUTER_API_KEY`、`SILICONFLOW_API_KEY`、`HUAWEI_MAAS_API_KEY` | 任选其一启用 AI（OpenAI 兼容接口） |
 | `LLM_API_KEY` | 通用兜底 key |
-| `BOCHA_API_KEY` / `TAVILY_API_KEY` | 联网搜索（博查 / Tavily 任选其一，供 AI 攻略问答引用实时网页并标注来源） |
+| `BOCHA_API_KEY` / `TAVILY_API_KEY` / `DEEPSEEK_API_KEY` | 联网搜索（博查 / Tavily / DeepSeek 官方 Search API 任选其一，供 AI 攻略问答引用实时网页并标注来源） |
 | `AMAP_MIN_INTERVAL` | 高德节流间隔（秒，默认 0.34） |
 
 密钥只从环境变量读取，不会写入仓库；页面上的「AI 设置」面板也可以临时填 key（只存本机浏览器）。
