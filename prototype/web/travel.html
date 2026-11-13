@@ -204,8 +204,13 @@
         <button data-scheme="recommended" class="on">🤖 系统推荐 · 最省时</button>
         <button data-scheme="popular">🔥 大众经典路线</button>
         <button data-scheme="custom">✍️ 自定义安排</button>
+        <button data-scheme="ai">✨ AI 编排</button>
       </div>
       <p class="muted" id="schemeMeta"></p>
+      <div id="aiPlanBar" class="ai-plan-bar hidden">
+        <span id="aiPlanStatus" class="ai-plan-status"></span>
+        <button id="btnAiReplan" class="ghost-btn sm" type="button">🔄 重新编排</button>
+      </div>
       <p class="trip-meta" id="tripMeta"></p>
       <div class="opt-row">
         <label class="chk"><input type="checkbox" id="chkTicket" checked> 费用计入门票</label>
@@ -247,6 +252,7 @@
         <button id="btnProvider" class="ghost-btn sm" title="在 自动 / 百度 / 高德 之间切换路网服务">路网：自动</button>
         <button id="btnFitSpots" class="ghost-btn sm">查看全部景点</button>
         <button id="btnFitRoute" class="ghost-btn sm">回到路线</button>
+        <button id="btnMapFull" class="ghost-btn sm" type="button" title="全屏查看地图，手机上更大更好操作">⛶ 全屏</button>
       </div>
     </div>
     <div id="map"></div>
@@ -263,7 +269,8 @@
 
 <footer class="foot">
   页面为演示原型：城际交通时间/价格、市内通勤时长均为<b>估算值</b>；上车站/机场与出租车计价为公开资料整理（见数据文件来源标注）；
-  攻略面板为演示数据；景点坐标为近似值（GCJ-02）。底图 © OpenStreetMap（配浏览器端 AK 后为百度地图）·
+  攻略面板为演示数据；景点坐标为近似值（GCJ-02），底图坐标系会按 OSM（WGS-84）/ 高德瓦片（GCJ-02）自动换算，
+  避免国内偏移（配浏览器端 AK 后为百度地图）·
   路网里程来自<b>百度地图 / 高德地图</b>双供应商（可在右上角一键切换，按 2 次/秒排队调用）/ OSRM。导航跳转经百度或高德 URI API。
   站点/机场/景点候补数据来自 OpenStreetMap（Nominatim / Overpass，ODbL 许可）与 12306 公开车站库，不占百度配额。
   算法与交互结构为真实实现。打车费用为出租车计价估算——滴滴/哈罗无公开 API，已预留适配位。
