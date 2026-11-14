@@ -158,11 +158,14 @@ const AI = {
     const timeoutMs = opts.timeoutMs || 60000;
     const body = {
       baseURL: this.cfg.baseURL,
-      model: this.cfg.model,
+      model: opts.model || this.cfg.model,
       messages,
       temperature: opts.temperature,
       maxTokens: opts.maxTokens,
     };
+    // 结构化抽取这类任务可以关掉思考、换快模型（由调用方通过 opts 指定）
+    if (opts.thinking) body.thinking = opts.thinking;
+    if (opts.responseFormat) body.response_format = opts.responseFormat;
     // DeepSeek 官方没有 CORS：没本地代理就直接给可行动的报错
     const useProxy = !!this.server;
     if (!this.server) {
@@ -191,15 +194,25 @@ const AI = {
         headers,
         signal: ctrl.signal,
         body: JSON.stringify(useProxy ? body : {
-          model: this.cfg.model,
+          model: opts.model || this.cfg.model,
           messages,
           stream: false,
           ...(opts.temperature != null ? { temperature: opts.temperature } : {}),
           ...(opts.maxTokens ? { max_tokens: opts.maxTokens } : {}),
+          ...(opts.thinking ? { thinking: opts.thinking } : {}),
+          ...(opts.responseFormat ? { response_format: opts.responseFormat } : {}),
         }),
       });
       const data = await r.json().catch(() => ({}));
-      if (useProxy) return this._explain(data); // serve.py 已归一化 {ok, content, error}
+      if (useProxy) {
+        const res = this._explain(data); // serve.py 已归一化 {ok, content, error}
+        // 空内容多半是思考模式把 token 预算吃完了：明确报错，别让页面一直等
+        if (res && res.ok && !String(res.content || '').trim()) {
+          res.ok = false;
+          res.error = '模型返回内容为空（可能是思考模式占用了 token 预算）。可在「AI 设置」换更快的模型后重试。';
+        }
+        return res;
+      }
       const content = data.choices && data.choices[0] && data.choices[0].message
         ? (data.choices[0].message.content || '') : '';
       if (!r.ok) return this._explain({ ok: false, via: 'direct', error: `上游返回 ${r.status}：${JSON.stringify(data).slice(0, 300)}` });

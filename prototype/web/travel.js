@@ -2705,18 +2705,30 @@ function restoreBuiltinSpots(city) {
   return true;
 }
 
-// 免费地理编码：OpenStreetMap Nominatim（serve.py 代理 + 缓存 + 限速），失败由 LLM 估算坐标兜底
+// 免费地理编码：OpenStreetMap Nominatim（serve.py 代理 + 缓存 + 限速）。
+// 注意：Nominatim 在国内网络经常连不通，所以这里**只给没坐标的景点补定位**，
+// 且单次最多等 2.5 秒——AI 自己给的近似坐标直接可用，不能让定位拖死整个搜索。
 async function geocodeAiSpots(city, spots) {
   const out = new Map();
-  for (const s of spots.slice(0, 12)) {
+  const need = spots.filter(s => {
+    const lng = Number(s.lng), lat = Number(s.lat);
+    return !Number.isFinite(lng) || !Number.isFinite(lat)
+      || Math.abs(lng) > 180 || Math.abs(lat) > 90;
+  }).slice(0, 4);
+  for (const s of need) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 2500);
     try {
-      const r = await fetch(`/api/free/places?q=${encodeURIComponent(s.name)}&city=${encodeURIComponent(city)}&limit=1`, { cache: 'no-store' });
+      const r = await fetch(`/api/free/places?q=${encodeURIComponent(s.name)}&city=${encodeURIComponent(city)}&limit=1`,
+        { cache: 'no-store', signal: ctrl.signal });
       const d = await r.json();
       const hit = d && d.ok && Array.isArray(d.places) && d.places[0];
       if (hit && Number.isFinite(Number(hit.lat)) && Number.isFinite(Number(hit.lng))) {
         out.set(s.name, { lng: Number(hit.lng), lat: Number(hit.lat), src: 'nominatim' });
       }
-    } catch (e) { /* 无定位时用 LLM 估算坐标 */ }
+    } catch (e) { /* 超时/不可用：用 LLM 估算坐标 */ } finally {
+      clearTimeout(timer);
+    }
   }
   return out;
 }
@@ -2807,14 +2819,24 @@ async function aiSearchSpots(city, force) {
         + sr.results.map((s, i) => `[${i + 1}] ${s.title}\n${s.snippet}`).join('\n\n')
       : '';
     // 2) LLM 提取结构化景点 + 近似坐标（地理编码失败时的兜底）
+    //    这类"照着检索结果抄结构"的任务不需要深度思考：DeepSeek 通道下切 flash 并关思考，
+    //    v4-pro 在这个 prompt 上会烧 3000+ 推理 token、单次要 30 秒以上。
     const messages = [
-      { role: 'system', content: '你是景点数据编辑。从给定的网络检索结果中提取目的地真实景点，输出 JSON：'
-        + '{"spots":[{"name":"景点名","area":"所在区/商圈","desc":"一句话亮点","tier":"hot|value|niche|explore","ticket":门票数字（免费或不确定填0）,"suggest_min":建议游玩分钟数,"lng":经度估算,"lat":纬度估算}]}。'
-        + '要求：提取 8-14 个最值得去的景点，按 tier 归类（热门hot/性价比value/小众niche/待探索explore）；'
-        + 'lng/lat 给出你的近似估算值（中国境内坐标偏差可接受），不确定也要给合理值；只输出 JSON。' },
-      { role: 'user', content: `目的地城市：${city}${webBlock || '\n（本次没有网络检索结果，请基于你的公开常识给出该城市真实景点，禁止编造不存在的地名。）'}` },
+      { role: 'system', content: '你是景点数据编辑。只输出 JSON：'
+        + '{"spots":[{"name":"景点名","area":"所在区/商圈","desc":"一句话亮点（20字内）","tier":"hot|value|niche|explore","ticket":0,"suggest_min":90,"lng":104.06,"lat":30.66}]}。'
+        + '要求：提取 8-12 个真实存在的景点，按 tier 归类；lng/lat 给近似估算值；不要解释，不要 Markdown。' },
+      { role: 'user', content: `目的地城市：${city}${webBlock || '\n（本次没有网络检索结果，请基于公开常识给出该城市真实景点，禁止编造不存在的地名。）'}` },
     ];
-    const r = await AI.chat(messages, { task: 'spots', temperature: 0.3, maxTokens: 1600 });
+    const isDS = (AI.cfg.baseURL || '').toLowerCase().includes('api.deepseek.com');
+    const r = await AI.chat(messages, {
+      task: 'spots',
+      temperature: 0.2,
+      maxTokens: 1800,
+      timeoutMs: 45000,
+      model: isDS && AI.cfg.model !== 'deepseek-flash' ? 'deepseek-flash' : AI.cfg.model,
+      thinking: isDS ? { type: 'disabled' } : undefined,
+      responseFormat: isDS ? { type: 'json_object' } : undefined,
+    });
     if (seq !== aiSpotsSeq) return;
     if (!r.ok) throw new Error(r.error || 'AI 请求失败');
     const data = AI.extractJSON(r.content);

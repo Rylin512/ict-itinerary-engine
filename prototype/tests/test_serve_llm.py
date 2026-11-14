@@ -82,6 +82,18 @@ class TestBuildRequest(unittest.TestCase):
         self.assertEqual(payload["temperature"], 0.3)
         self.assertEqual(payload["max_tokens"], 500)
 
+    def test_forwards_thinking_and_json_mode(self):
+        body = self._body(thinking={"type": "disabled"}, response_format={"type": "json_object"})
+        _, _, payload = serve.build_upstream_request(body, "sk-test")
+        self.assertEqual(payload["thinking"], {"type": "disabled"})
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+
+    def test_ignores_malformed_thinking(self):
+        body = self._body(thinking="disabled", response_format="json")
+        _, _, payload = serve.build_upstream_request(body, "sk-test")
+        self.assertNotIn("thinking", payload)
+        self.assertNotIn("response_format", payload)
+
     def test_missing_fields_and_bad_host_and_no_key(self):
         with self.assertRaises(ValueError):
             serve.build_upstream_request({"baseURL": "", "model": "m", "messages": [1]}, "k")
