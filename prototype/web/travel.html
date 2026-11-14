@@ -324,20 +324,21 @@
         <label>搜索源</label>
         <select id="webSearchProvider">
           <option value="auto">自动（按已配置的 key）</option>
-          <option value="demo">离线演示（无需 key，预置结果）</option>
+          <option value="deepseek">DeepSeek 官方搜索（按次计费）</option>
           <option value="bocha">博查（国内，api.bochaai.com）</option>
           <option value="tavily">Tavily（国际，每月免费额度）</option>
+          <option value="demo">离线演示（无需 key，预置结果）</option>
         </select>
       </div>
     </div>
     <div class="field">
-      <label>搜索 API Key（可选；留空则用 serve.py 环境变量 BOCHA_API_KEY / TAVILY_API_KEY）</label>
-      <input id="webSearchKey" type="password" placeholder="博查 / tvly-…">
+      <label>搜索 API Key（可选；留空则用 serve.py 环境变量 BOCHA_API_KEY / TAVILY_API_KEY / DEEPSEEK_API_KEY）</label>
+      <input id="webSearchKey" type="password" placeholder="博查 / tvly-… / DeepSeek sk-…">
     </div>
     <div class="action-row" style="margin-top:0">
       <button id="webSearchTest" class="ghost-btn" type="button">测试联网搜索</button>
     </div>
-    <p class="hint">开启后「攻略问答」和「AI 生成攻略」会先联网检索再作答，回答下方附可点击来源；讲解仍严格基于行程数据（不引入外部事实）。</p>
+    <p class="hint">开启后「攻略问答」和「AI 生成攻略」会先联网检索再作答，回答下方附可点击来源；讲解仍严格基于行程数据（不引入外部事实）。DeepSeek 官方搜索按成功请求计费（$0.75 / 千次），相同问题 6 小时内命中本地缓存、不重复计费。</p>
 
     <p class="hint" style="margin:16px 0 8px;font-weight:600;color:var(--ink)">百度地图开放平台</p>
     <p class="muted" id="baiduStatus"></p>

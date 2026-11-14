@@ -2897,7 +2897,7 @@ async function testWebSearch() {
     if (!$('#webSearchOn').value) { /* 控件未渲染时兜底 */ }
     const r = await AI.webSearch('成都 美食', 3);
     status.textContent = r.ok && r.results.length
-      ? `✅ 联网搜索正常（${r.provider === 'bocha' ? '博查' : 'Tavily'}，返回 ${r.results.length} 条测试结果）`
+      ? `✅ 联网搜索正常（${AI.searchProviderLabel(r.provider)}，返回 ${r.results.length} 条测试结果）`
       : `❌ ${r.error || '未返回结果'}`;
   } finally {
     AI.cfg = prev.cfg;

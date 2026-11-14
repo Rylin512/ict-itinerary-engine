@@ -67,15 +67,17 @@ const AI = {
     if (!this.cfg.searchOn) return false;
     if (!this.server || !this.server.proxy) return false;
     if (this.cfg.searchProvider === 'demo') return true;
-    if (this.cfg.searchProvider !== 'auto' && this.cfg.searchProvider !== 'bocha' && this.cfg.searchProvider !== 'tavily') return false;
+    const known = ['auto', 'bocha', 'tavily', 'deepseek'];
+    if (!known.includes(this.cfg.searchProvider)) return false;
     if (this.cfg.searchKey) return true;
     const s = this.server.search || {};
-    if (this.cfg.searchProvider === 'auto') return !!(s.bocha || s.tavily);
+    if (this.cfg.searchProvider === 'auto') return !!(s.bocha || s.tavily || s.deepseek);
     return !!s[this.cfg.searchProvider];
   },
 
   searchProviderLabel(p) {
-    return p === 'bocha' ? '博查' : p === 'tavily' ? 'Tavily' : p === 'demo' ? '离线演示' : '自动';
+    return p === 'bocha' ? '博查' : p === 'tavily' ? 'Tavily'
+      : p === 'deepseek' ? 'DeepSeek 搜索' : p === 'demo' ? '离线演示' : '自动';
   },
 
   searchStatusText() {
@@ -84,7 +86,8 @@ const AI = {
     const p = this.cfg.searchProvider || 'auto';
     if (p === 'demo') return '联网搜索：离线演示（预置结果，无需 key）';
     const s = this.server.search || {};
-    const env = [s.bocha ? '博查' : null, s.tavily ? 'Tavily' : null].filter(Boolean).join(' / ');
+    const env = [s.bocha ? '博查' : null, s.tavily ? 'Tavily' : null, s.deepseek ? 'DeepSeek 搜索' : null]
+      .filter(Boolean).join(' / ');
     const via = this.cfg.searchKey ? `页面 key（${this.searchProviderLabel(p)}）` : (env ? `环境变量（${env}）` : '未配置搜索 key');
     return `联网搜索：${this.searchProviderLabel(p)} · ${via}`;
   },
