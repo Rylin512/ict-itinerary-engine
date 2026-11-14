@@ -299,14 +299,12 @@ const routeEst = new Map();      // pairKey -> pairEstimate 结果（全程共�
 const routeGeo = new Map();      // `${mode}|${pairKey}` -> 百度实际路线 {path,km,min,cost}
 let routesSeq = 0;               // 状态变更后丢弃过期的异步结果
 let geoToken = 0;                // 起终点/酒店变化后作废在途的路线几何请求
-let fastestToken = 0;            // 作废在途的「最快组合」计算
 
 function resetRoutes() {         // 酒店或景点坐标变化后，旧路网缓存全部失效
   routeEst.clear();
   routeGeo.clear();
   routesSeq++;
   geoToken++;
-  fastestToken++;
 }
 
 /* --- 景点真实出入口：用百度地点检索的 navi_location 替换 POI 近似坐标 --- */
@@ -495,78 +493,6 @@ function legOptsFor(km, a, b) {
   return opts;
 }
 
-/* ================= 最快组合：逐段用百度实测时长比较多种方式 ================= */
-
-// 等车 / 叫车要留一点固定时间，否则公交和打车会被算得过于理想
-const LEG_WAIT_PENALTY = { walk: 0, bike: 0, transit: 4, taxi: 2 };
-
-function fastestCandidates(km0) {
-  return legOpts(km0).filter(o => {
-    if (o.id === 'walk') return km0 <= 3;   // 超过 3 km 步行不现实，也省一次请求
-    if (o.id === 'bike') return km0 <= 8;   // 超过 8 km 骑行不现实
-    if (o.id === 'transit' && km0 < 0.8) return false; // 太近，等车比走路还慢
-    if (o.id === 'taxi' && km0 < 0.8) return false;
-    return true;
-  });
-}
-
-// 逐段请求步行 / 骑行 / 公交地铁 / 打车，选「实测时长 + 固定等待」最短的一种。
-// 每段可以是不同方式；公交地铁本身是「步行 + 地铁/公交」的混合路线。
-async function applyFastestModes(btn) {
-  if (!state.modes.length) return;
-  if (!MAPS.available()) {
-    toast('未配置地图 key，按真实路网里程与步行/骑行可达性估算');
-    state.modes = state.modes.map((_, i) => {
-      const ep = legEndpoints(i);
-      return ep ? smartModeFor(ep[0], ep[1]) : state.modes[i];
-    });
-    state.modeManual = Object.fromEntries(state.modes.map((_, i) => [i, true]));
-    renderTimeline();
-    drawRoute(false);
-    return;
-  }
-  const token = ++fastestToken;
-  const total = state.modes.length;
-  const oldText = btn ? btn.textContent : '';
-  if (btn) { btn.dataset.fastestRun = token; btn.disabled = true; btn.textContent = '对比中…'; }
-  showRouteLoading('正在对比最快组合', 0, total);
-  let finished = false;
-  try {
-    for (let i = 0; i < state.modes.length; i++) {
-      if (token !== fastestToken) return;
-      const ep = legEndpoints(i);
-      if (ep) {
-        const [a, b] = ep;
-        let best = null;
-        for (const o of fastestCandidates(roadKm(a, b))) {
-          if (token !== fastestToken) return;
-          const geo = await ensureGeo(a, b, o.id);
-          if (token !== fastestToken) return;
-          if (!geo) continue;
-          const min = geo.min + (LEG_WAIT_PENALTY[o.id] || 0);
-          if (!best || min < best.min) best = { id: o.id, min };
-        }
-        if (best) state.modes[i] = best.id;
-      }
-      showRouteLoading('正在对比最快组合', i + 1, total);
-    }
-    if (token !== fastestToken) return;
-    state.modeManual = Object.fromEntries(state.modes.map((_, i) => [i, true]));
-    renderTimeline();
-    drawRoute(false);
-    finished = true;
-    toast('已按实时路网选出每段最快方式（跨海段会自动排除步行/骑行）');
-  } finally {
-    if (btn && +btn.dataset.fastestRun === token) {
-      btn.disabled = false;
-      btn.textContent = oldText;
-      delete btn.dataset.fastestRun;
-    }
-    // 正常完成时由 drawRoute 决定是否继续显示加载提示；异常退出才在这里收起
-    if (!finished && token === fastestToken) hideRouteLoading();
-  }
-}
-
 function accessTotals() {
   const acc = state.access;
   if (!acc) return { min: 0, cost: 0, fromOnly: 0, toOnly: 0 };
@@ -630,7 +556,7 @@ function renderTransport() {
   const okList = list.filter(o => o.ok);
   const fastest = okList.reduce((m, o) => o.min < m.min ? o : m, okList[0]);
   const cheapest = okList.reduce((m, o) => o.cost < m.cost ? o : m, okList[0]);
-  $('#transportList').innerHTML = list.map(o => {
+  const html = list.map(o => {
     if (!o.ok) {
       return `<button class="tcard off" disabled>
         <span class="ico">${o.icon}</span>
@@ -659,6 +585,14 @@ function renderTransport() {
       <span><span class="time">${fmtDur(o.min)}</span><span class="cost" style="display:block">${fmtCost(o.cost)}</span></span>
     </button>`;
   }).join('');
+  // 幂等重绘：内容没变就不动 DOM。ensureRoutes 回调会频繁重渲染本面板，
+  // 若恰逢用户点击，innerHTML 重建会让点击目标瞬间消失、事件丢失，
+  // 表现为「点了交通卡片没反应」。
+  const tl = $('#transportList');
+  if (tl._lastHtml !== html) {
+    tl._lastHtml = html;
+    tl.innerHTML = html;
+  }
   renderAccessBar();
   renderStationPanel();
 }
@@ -1201,17 +1135,7 @@ function computeSchemes() {
 
 function getOrder() { return state.orders[state.scheme] || []; }
 
-function resetFastestButton() {
-  $$('.preset-row [data-preset="smart"]').forEach(b => {
-    b.disabled = false;
-    b.textContent = '⚡ 最快组合';
-    delete b.dataset.fastestRun;
-  });
-}
-
 function initModes() {
-  fastestToken++;  // 方案 / 顺序变了，在途的最快组合结果作废
-  resetFastestButton();
   const hub = hubOf(state.to);
   state.modes = [];
   state.modeManual = {};  // 用户手动改过的路段；自动刷新时不动这些段
@@ -2705,25 +2629,42 @@ function restoreBuiltinSpots(city) {
   return true;
 }
 
-// 免费地理编码：OpenStreetMap Nominatim（serve.py 代理 + 缓存 + 限速）。
-// 注意：Nominatim 在国内网络经常连不通，所以这里**只给没坐标的景点补定位**，
-// 且单次最多等 2.5 秒——AI 自己给的近似坐标直接可用，不能让定位拖死整个搜索。
+// AI 景点定位（三层，越靠前越精确）：
+// 1) 地图 API 地点检索（百度/高德，需 serve.py 配 AK）——精确 POI 坐标
+// 2) OpenStreetMap Nominatim 免费接口（serve.py 代理 + 缓存 + 限速）——无 key 时的兜底；
+//    在国内网络经常连不通，单次最多等 2.5 秒
+// 3) LLM 给出的近似估算坐标——前两层都拿不到时才使用（横幅已标注坐标为近似值）
+const GEOCODE_SPOT_TIMEOUT = 2500;   // 单个 Nominatim 请求超时
+const GEOCODE_TOTAL_BUDGET = 20000;  // 定位阶段总预算，超时后剩余景点直接用 LLM 坐标
 async function geocodeAiSpots(city, spots) {
   const out = new Map();
-  const need = spots.filter(s => {
-    const lng = Number(s.lng), lat = Number(s.lat);
-    return !Number.isFinite(lng) || !Number.isFinite(lat)
-      || Math.abs(lng) > 180 || Math.abs(lat) > 90;
-  }).slice(0, 4);
-  for (const s of need) {
+  const t0 = Date.now();
+  for (const s of spots) {
+    if (Date.now() - t0 > GEOCODE_TOTAL_BUDGET) break;
+    // 1) 地图 API 地点检索：名称 + 城市，取第一个结果的出入口/中心坐标
+    if (MAPS.available()) {
+      try {
+        const places = await MAPS.searchPlaces(s.name, city, 1);
+        const hit = places && places[0];
+        const lng = hit && (hit.navLng ?? hit.lng), lat = hit && (hit.navLat ?? hit.lat);
+        if (Number.isFinite(Number(lng)) && Number.isFinite(Number(lat))) {
+          out.set(s.name, { lng: Number(lng), lat: Number(lat), src: 'mapapi' });
+          continue;
+        }
+      } catch (e) { /* 地图检索失败：试 Nominatim */ }
+    }
+    // 2) Nominatim 免费接口；校验返回地址确实在目标城市，避免跨城误匹配
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 2500);
+    const timer = setTimeout(() => ctrl.abort(), GEOCODE_SPOT_TIMEOUT);
     try {
       const r = await fetch(`/api/free/places?q=${encodeURIComponent(s.name)}&city=${encodeURIComponent(city)}&limit=1`,
         { cache: 'no-store', signal: ctrl.signal });
       const d = await r.json();
       const hit = d && d.ok && Array.isArray(d.places) && d.places[0];
-      if (hit && Number.isFinite(Number(hit.lat)) && Number.isFinite(Number(hit.lng))) {
+      const cityRoot = city.replace(/(市|地区|盟|自治州|特别行政区)$/, '');
+      const inCity = hit && (!hit.address || cityRoot.length <= 2
+        || String(hit.address).includes(cityRoot));
+      if (hit && inCity && Number.isFinite(Number(hit.lat)) && Number.isFinite(Number(hit.lng))) {
         out.set(s.name, { lng: Number(hit.lng), lat: Number(hit.lat), src: 'nominatim' });
       }
     } catch (e) { /* 超时/不可用：用 LLM 估算坐标 */ } finally {
@@ -2861,7 +2802,7 @@ async function aiSearchSpots(city, force) {
         suggest_min: Math.max(30, Math.min(300, Number(s.suggest_min) || 90)),
         satisfaction: 0.75,
         note: `${String(s.desc || s.area || '').slice(0, 80)}`
-          + `（AI 检索 · ${g.src === 'nominatim' ? 'OSM 定位' : 'AI 估算坐标'}）`,
+          + `（AI 检索 · ${g.src === 'mapapi' ? '地图 API 精确定位' : g.src === 'nominatim' ? 'OSM 定位' : 'AI 估算坐标'}）`,
         city,
       };
     }).filter(Boolean);
@@ -3268,16 +3209,19 @@ function getAiScheme(key) {
   return (state.aiSchemes || []).find(s => s.key === key) || null;
 }
 
-// 方案 tabs：本地两个 + AI 候选（动态）+ 自定义；「AI 编排」常驻作为生成入口
+// 方案 tabs：按来源分三组——本地计算 / AI 编排 / 手动调整
 function renderSchemeTabs() {
   const tabs = $('#schemeTabs');
   if (!tabs) return;
   const btn = (key, label, dis) =>
     `<button data-scheme="${key}"${state.scheme === key ? ' class="on"' : ''}${dis ? ' disabled' : ''}>${label}</button>`;
-  let h = btn('recommended', '🤖 系统推荐 · 最省时') + btn('popular', '🔥 大众经典路线');
-  (state.aiSchemes || []).forEach(s => { h += btn(s.key, `✨ AI·${esc(s.label)}`); });
-  h += btn('ai-gen', state.aiBusy ? '✨ 编排中…' : '✨ AI 编排', state.aiBusy);
-  h += btn('custom', '✍️ 自定义安排');
+  const group = t => `<span class="scheme-group">${t}</span>`;
+  let h = group('本地计算') + btn('recommended', '🤖 推荐 · 最省时') + btn('popular', '🔥 大众经典');
+  const schemes = state.aiSchemes || [];
+  h += group('AI 编排');
+  schemes.forEach(s => { h += btn(s.key, `✨ ${esc(s.label)}`); });
+  h += btn('ai-gen', state.aiBusy ? '✨ 编排中…' : '✨ 生成 AI 方案', state.aiBusy);
+  h += group('手动') + btn('custom', '✍️ 自定义安排');
   tabs.innerHTML = h;
 }
 
@@ -3524,6 +3468,17 @@ function applySlots(slots, rawText) {
   $('#returnDate').value = addDaysStr(start, days - 1);
   updateTripHint();
   doQuery();
+  // AI 规划自动选「大多数人选择」的城际方式（intercity 在 doQuery 里重建）：
+  // 否则用户回到步骤②时卡片无选中态、确认按钮禁用，会误以为选了交通却没生效
+  if (!state.transport && state.intercity) {
+    const pop = (state.intercity.list || []).find(o => o.id === state.intercity.popular && o.ok);
+    if (pop) {
+      state.transport = pop;
+      rebuildAccess();
+      renderTransport();
+      $('#btnTo3').disabled = false;
+    }
+  }
   // 按兴趣预选景点：关键词匹配名称/备注/分级，匹配不到就按满意度取每天约 3 个
   const list = POIS[city] || [];
   if (list.length) {
@@ -4063,15 +4018,7 @@ function bind() {
     renderTimeline();
   });
   $$('.preset-row [data-preset]').forEach(btn => btn.addEventListener('click', () => {
-    const p = btn.dataset.preset;
-    if (p === 'smart') {
-      // 最快组合：逐段对比百度实测时长，允许每段使用不同交通方式
-      applyFastestModes(btn).catch(err => toast(`最快组合计算失败：${err && err.message ? err.message : err}`));
-      return;
-    }
-    fastestToken++;  // 取消在途的最快组合
-    resetFastestButton();
-    state.modes = state.modes.map(() => p);
+    state.modes = state.modes.map(() => btn.dataset.preset);
     state.modeManual = Object.fromEntries(state.modes.map((_, i) => [i, true]));
     renderTimeline();
     drawRoute(false);

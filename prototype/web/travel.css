@@ -229,6 +229,9 @@ button.on.ghost-btn{background:var(--accent-soft);border-color:var(--accent);col
   padding:6px 14px;font-size:12.5px;color:var(--muted);transition:.2s;
 }
 .scheme-tabs button.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+.scheme-tabs .scheme-group{align-self:center;font-size:11px;color:var(--muted);font-weight:600;
+  padding:0 2px 0 8px;border-left:2px solid var(--line);}
+.scheme-tabs .scheme-group:first-child{border-left:none;padding-left:0}
 .scheme-tabs button.busy{opacity:.6;cursor:wait}
 .route-confirm{
   display:flex;align-items:center;gap:10px;flex-wrap:wrap;
