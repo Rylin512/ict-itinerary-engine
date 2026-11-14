@@ -70,6 +70,11 @@ FREE_PLACE_TTL = 30 * 86400
 FREE_POI_TTL = 7 * 86400
 SEARCH_TTL = 6 * 3600  # 联网搜索结果：同一 query 6 小时内不重复计费
 FREE_MIN_INTERVAL = 1.0  # Nominatim / Overpass 公共服务的礼貌间隔（≤1 次/秒）
+FREE_TIMEOUT = float(os.environ.get("FREE_TIMEOUT", "6"))   # 单次请求超时（秒）
+FREE_FAIL_THRESHOLD = 2   # 连续失败几次后熔断
+FREE_DOWN_SECONDS = 300   # 熔断时长
+_FREE_DOWN_UNTIL = [0.0]
+_FREE_FAILS = [0]
 _CACHE = None  # 兼容旧测试：置 None 后下次访问会重新打开数据库
 _DB = None
 _DB_PATH = None
@@ -406,6 +411,11 @@ def build_upstream_request(body, key):
         payload["temperature"] = float(body["temperature"])
     if body.get("max_tokens"):
         payload["max_tokens"] = int(body["max_tokens"])
+    # 透传可选能力：thinking（DeepSeek v4 思考开关）、response_format（JSON 模式）
+    if isinstance(body.get("thinking"), dict):
+        payload["thinking"] = body["thinking"]
+    if isinstance(body.get("response_format"), dict):
+        payload["response_format"] = body["response_format"]
     return url, headers, payload
 
 
@@ -1927,14 +1937,30 @@ def wgs84_to_gcj02(lng, lat):
     return [lng + dlng, lat + dlat]
 
 
-def _free_get_json(url, timeout=25):
+def _free_get_json(url, timeout=None):
+    """访问 OSM 公共服务；连续失败后熔断 5 分钟，避免每个请求都干等超时。
+
+    Nominatim / Overpass 在国内网络经常连不通，而浏览器侧一次请求有 30 多秒
+    超时，串行调用会让人觉得"卡死"。熔断期间直接快速失败，调用方走兜底逻辑。
+    """
+    if time.time() < _FREE_DOWN_UNTIL[0]:
+        raise urllib.error.URLError("OpenStreetMap 服务暂不可用（熔断中），已跳过")
     free_gate()
     req = urllib.request.Request(url, headers={
         "User-Agent": FREE_UA,
         "Accept": "application/json",
     })
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8", errors="replace"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout or FREE_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
+        _FREE_FAILS[0] += 1
+        if _FREE_FAILS[0] >= FREE_FAIL_THRESHOLD:
+            _FREE_DOWN_UNTIL[0] = time.time() + FREE_DOWN_SECONDS
+            _FREE_FAILS[0] = 0
+        raise
+    _FREE_FAILS[0] = 0
+    return data
 
 
 def _free_place_name(item):
