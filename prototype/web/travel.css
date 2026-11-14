@@ -230,6 +230,13 @@ button.on.ghost-btn{background:var(--accent-soft);border-color:var(--accent);col
 }
 .scheme-tabs button.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
 .scheme-tabs button.busy{opacity:.6;cursor:wait}
+.route-confirm{
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  margin:2px 0 10px;padding:8px 12px;border:1px dashed var(--line);border-radius:10px;
+  background:var(--line-soft);font-size:12px;
+}
+.route-confirm .muted{flex:1 1 220px;min-width:0;line-height:1.5}
+.route-confirm .primary{flex:none}
 .ai-plan-bar{
   display:flex;align-items:center;gap:10px;flex-wrap:wrap;
   margin:-2px 0 10px;padding:8px 12px;border:1px solid #d8e6df;border-radius:10px;

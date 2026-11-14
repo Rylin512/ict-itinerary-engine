@@ -168,26 +168,17 @@
       <div class="pool-head">
         <span id="selInfo" class="muted">已选 0 个 · 游玩约 0 分钟</span>
         <span>
-          <button id="btnGuide" class="ghost-btn">📍 目的地情报</button>
           <button id="btnClassic" class="ghost-btn">🔥 一键选入经典组合</button>
         </span>
       </div>
       <div class="tier-filter" id="tierFilter"></div>
-      <div id="guidePanel" class="guide hidden">
+      <div id="guidePanel" class="guide">
         <div class="g-banner" id="guideBanner"></div>
-        <div class="g-tabs" id="guideTabs">
-          <button data-gtab="food"></button>
-          <button data-gtab="stay"></button>
-          <button data-gtab="tips"></button>
-          <button data-gtab="ideas"></button>
-        </div>
-        <input id="guideSearch" placeholder="检索攻略，如：住宿 / 火锅 / 避坑 / 预约">
-        <div id="guideList" class="g-list"></div>
         <div class="g-ask">
-          <input id="guideQ" placeholder="攻略库里没有的，直接问：带爸妈两天怎么排？">
+          <input id="guideQ" placeholder="景点之外的问题直接问：带爸妈两天怎么排？">
           <button id="btnGuideAsk" class="ghost-btn">问 AI</button>
         </div>
-        <button id="guideGen" class="ghost-btn hidden" style="margin-top:8px">让 AI 生成该城市攻略</button>
+        <button id="guideGen" class="ghost-btn" style="margin-top:8px">✨ AI 搜索当地景点（联网）</button>
       </div>
       <div id="spotGrid" class="spot-grid"></div>
       <p class="hint">景点分四级：<b>🔥热门</b>（必去打卡）、<b>💰性价比</b>（免费或便宜但值得）、<b>🌿冷门</b>（本地人爱去）、<b>🧭待探索</b>（新晋网红 / 小众宝藏）。右侧地图即分布，点圆点也可勾选。</p>
@@ -204,7 +195,10 @@
         <button data-scheme="recommended" class="on">🤖 系统推荐 · 最省时</button>
         <button data-scheme="popular">🔥 大众经典路线</button>
         <button data-scheme="custom">✍️ 自定义安排</button>
-        <button data-scheme="ai">✨ AI 编排</button>
+      </div>
+      <div id="routeConfirmBar" class="route-confirm hidden">
+        <span id="routeConfirmText" class="muted"></span>
+        <button id="btnConfirmRoute" class="primary sm" type="button">✅ 采用此方案并算路</button>
       </div>
       <p class="muted" id="schemeMeta"></p>
       <div id="aiPlanBar" class="ai-plan-bar hidden">
