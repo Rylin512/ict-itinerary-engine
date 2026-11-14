@@ -86,12 +86,15 @@ const state = {
   transport: null,
   intercity: null,
   selected: [],
-  orders: {},        // {recommended:[[dayIds]], popular:[[..]], custom:[[..]], ai:[[..]]}
+  orders: {},        // {recommended:[[dayIds]], popular:[[..]], custom:[[..]], ai-0:[[..]], ...}
   scheme: 'recommended',
   modes: [],         // 所有天的通勤方式，扁平数组
   modeManual: {},    // 手动指定过的路段下标；自动刷新不覆盖
-  aiPlan: null,      // {days, reasons, sig, model, moved, dropped}；AI 编排结果
+  aiPlan: null,      // {sig, model, at}；最近一次 AI 编排的签名与模型
+  aiSchemes: null,   // [{key:'ai-0', label, desc, days, reasons, dropped, moved}]；AI 多方案候选
   aiBusy: false,     // AI 编排请求中
+  confirmedScheme: null,  // 用户确认采用并算过路的方案 key
+  routeConfirmed: false,  // 当前展示的方案是否已确认（确认后才调用算路 API）
   withTicket: true,
   step: 1,
   maxStep: 1,
@@ -100,7 +103,6 @@ const state = {
   boardStations: {},     // 用户手选的上/下车站，键 'from:hsr' / 'to:flight'
   access: null,          // 接驳估算 {from:{taxi,transit,src}, to:{...}}；null=暂无
   hotels: {},            // 目的地城市 -> 用户选定的酒店 {name,address,lat,lng,addrLat,addrLng,hasNav}
-  guideTab: 'food',
 };
 
 function esc(s) {
@@ -1286,7 +1288,7 @@ function schemeMetaText() {
   const alg = state.scheme === 'recommended'
     ? `地理聚类分 ${state.days.length} 天 + 每天最优排序${n <= 8 ? '（全排列枚举）' : '（贪心 + 2-opt）'}`
     : state.scheme === 'popular' ? '按「人气 ÷ 就近」排链路后按时间窗切段'
-      : state.scheme === 'ai' ? `AI 按地理关系与时间窗分 ${state.days.length} 天（${(state.aiPlan && state.aiPlan.model) || '大模型'}）`
+      : String(state.scheme).startsWith('ai') ? `AI 编排 · ${(getAiScheme(state.scheme) || {}).desc || '按地理关系与时间窗分天'}（${(state.aiPlan && state.aiPlan.model) || '大模型'}）`
         : '手动调整：当天内 ↑↓ 排序，⇤⇥ 跨天挪动';
   return `${alg} · 市内通勤 ${fmtDur(t.moveMin)} / ${fmtKm(t.km)} · 游玩 ${fmtDur(t.playMin)}`;
 }
@@ -1470,8 +1472,9 @@ function renderTimeline() {
       + (pd.warn ? `<span class="d-warn">⚠ 超出时间窗约 ${fmtDur(pd.warn)}</span>` : '')
       + `</div>`
       + `<div class="day-body">`;
-    if (state.scheme === 'ai' && state.aiPlan && state.aiPlan.reasons[di]) {
-      h += `<div class="ai-why">✨ ${esc(state.aiPlan.reasons[di])}</div>`;
+    const aiWhy = String(state.scheme).startsWith('ai') ? (getAiScheme(state.scheme) || {}).reasons?.[di] : null;
+    if (aiWhy) {
+      h += `<div class="ai-why">✨ ${esc(aiWhy)}</div>`;
     }
     if (!dayIds.length) {
       h += `<div class="t-rest">🌿 这一天自由活动，可在「自定义安排」里把景点挪过来</div></div></div>`;
@@ -1588,6 +1591,7 @@ function loadFreeSpots(city) {
     spots.forEach(p => { POIMAP[p.id] = p; });
     entry.list = spots;
     entry.failedAt = 0;
+    SPOT_SOURCE[city] = 'osm';
     if (state.to.name === city && state.step === 3) {
       renderSpots();
       showSpots(true);
@@ -2150,7 +2154,8 @@ function refreshSpotMarkers() {
   if (!map) return;
   Object.keys(spotMarkers).forEach(id => {
     const on = state.selected.includes(id);
-    MAPAPI.setDotFill(spotMarkers[id], on ? '#1f6b4f' : '#a8a093');
+    // 选中 = 金色高亮突出（AI 景点与内置景点同一套交互）
+    MAPAPI.setDotFill(spotMarkers[id], on ? '#e8b004' : '#a8a093');
   });
 }
 
@@ -2270,11 +2275,11 @@ function hideRouteLoading() {
 }
 
 function drawRoute(fit, skipFetch) {
-  if (!map) { hideRouteLoading(); return; }
+  if (!map) { hideRouteLoading(); hideRouteConfirmBar(); return; }
   gRoute.clear();
-  if (state.step < 4 || !state.selected.length) { hideRouteLoading(); return; }
+  if (state.step < 4 || !state.selected.length) { hideRouteLoading(); hideRouteConfirmBar(); return; }
   const order = getOrder();
-  if (!order.flat().length) { hideRouteLoading(); return; }
+  if (!order.flat().length) { hideRouteLoading(); hideRouteConfirmBar(); return; }
   const hub = hubOf(state.to);
   const allPts = [hub];
   const pins = [{ pt: hub, html: '<div class="pin hub">🏨</div>', popup: `<b>${esc(hub.name)}</b><br>${hub.hotel ? (hub.hasNav ? '已选酒店（按酒店出入口坐标）' : '已选酒店（百度地点坐标）') : '住宿 / 出发点（全程同一酒店）'}` }];
@@ -2338,14 +2343,33 @@ function drawRoute(fit, skipFetch) {
   // 方式圆标压在路线之上、编号图钉之下
   badges.forEach(({ pt, html, popup }) => MAPAPI.pin(gRoute, pt, { html, w: 22, h: 22, z: 300, popup }));
   if (fit) fitPts(allPts);
-  // 详细路线还在取：地图先画直线兜底，并在右下角提示进度
+  // 两阶段：未确认方案 = 纯直线示意（不调用算路 API）；确认后才逐段拉真实道路
   const pending = legs.filter(l => !routeGeo.has(geoKeyOf(l.a, l.b, l.modeId))).length;
+  if (!state.routeConfirmed) {
+    showRouteConfirmBar(legs.length);
+    hideRouteLoading();
+    return;
+  }
+  hideRouteConfirmBar();
   if (pending) {
     showRouteLoading('正在加载详细路线', legs.length - pending, legs.length);
   } else {
     hideRouteLoading();
   }
   if (!skipFetch) fetchLegGeometry(legs);
+}
+
+function showRouteConfirmBar(legCount) {
+  const bar = $('#routeConfirmBar');
+  if (!bar) return;
+  bar.classList.remove('hidden');
+  const text = $('#routeConfirmText');
+  if (text) text.textContent = `当前为 ${legCount ?? '?'} 段直线示意（未调用算路 API）。确认方案后按所选通勤方式计算实际道路路线与时间。`;
+}
+
+function hideRouteConfirmBar() {
+  const bar = $('#routeConfirmBar');
+  if (bar) bar.classList.add('hidden');
 }
 
 /* ================= 复制行程单 ================= */
@@ -2635,72 +2659,206 @@ function retrieveGuide(city, q) { // 大字重合检索：问题与条目的二�
     .slice(0, 8);
 }
 
-function renderGuide() {
-  const city = state.to.name;
-  const g = guideFor(city);
-  const labels = { food: '🍜 美食', stay: '🏨 住宿', tips: '⚠️ 贴士', ideas: '💡 灵感' };
-  $$('#guideTabs button').forEach(b => {
-    b.classList.toggle('on', b.dataset.gtab === state.guideTab);
-    b.textContent = labels[b.dataset.gtab];
+/* ================= AI 实时景点（联网搜索 → LLM 提取 → 免费地理编码） =================
+ * 默认数据源：AI 联网搜索；内置 POI_RAW 仅作为 AI 不可用时的回退。 */
+
+const AI_SPOTS_TTL = 24 * 3600 * 1000;
+const AI_SPOTS_LS = city => `travel.ai.spots.${city}`;
+let aiSpotsBusy = false;
+let aiSpotsSeq = 0;  // 城市切换 / 重复触发后丢弃在途结果
+
+// 从 POI_RAW 重建内置景点（AI 搜索失败时的回退数据源）
+function builtinSpotsOf(city) {
+  const raw = POI_RAW[city];
+  if (!raw) return null;
+  return raw.map(([name, lat, lng, tier, ticket, suggest_min, satisfaction, note]) => {
+    const id = LEGACY_POI_IDS[name] || `${name}@${city}`;
+    const p = { id, name, lat, lng, tier, ticket, suggest_min, satisfaction, note, city };
+    POIMAP[id] = p;
+    return p;
   });
-  const banner = $('#guideBanner');
-  if (!g) {
-    banner.className = 'g-banner ai';
-    banner.textContent = '该城市暂无攻略条目；配置 AI 通道后可一键生成（生成结果仅供参考）。';
-    $('#guideList').innerHTML = '';
-    $('#guideGen').classList.remove('hidden');
-    return;
-  }
-  banner.className = 'g-banner' + (g.ai ? ' ai' : '');
-  banner.textContent = g.ai
-    ? '⚠ 以下内容由 AI 生成（本机缓存），仅供参考，出行前自行核实。'
-    : `演示数据：2026-10 联网检索公开攻略（知乎/携程社区/去哪儿/网易旅游等）整理；接入携程/同程开放平台后整体替换。`;
-  $('#guideGen').classList.add('hidden');
-  const kw = ($('#guideSearch').value || '').trim().toLowerCase();
-  let items = (g[state.guideTab] || []);
-  if (kw) items = items.filter(i => (i.t + i.d + (i.src || '')).toLowerCase().includes(kw));
-  $('#guideList').innerHTML = items.length
-    ? items.map(i => `<div class="g-item"><div class="g-t">${i.t}</div><div class="g-d">${i.d}</div>`
-      + `<div class="g-src">来源：${i.src || '公开攻略整理'}</div></div>`).join('')
-    : `<div class="g-item muted">没有匹配「${kw}」的条目，换个关键词，或直接在下方问 AI。</div>`;
 }
 
-async function aiGenGuide() {
-  if (!aiGuard() || !aiBegin()) return;
+const SPOT_SOURCE = {};  // city -> 'ai' | 'builtin' | 'osm'，横幅据此提示数据来源
+
+function applyAiSpots(city, spots) {
+  POIS[city] = spots;
+  spots.forEach(p => { POIMAP[p.id] = p; });
+  SPOT_SOURCE[city] = 'ai';
+  invalidateAIPlan();  // 景点变了，旧编排全部作废
+  if (state.to.name === city && state.step >= 3) {
+    renderSpots();
+    showSpots(true);
+  }
+}
+
+function restoreBuiltinSpots(city) {
+  const fallback = builtinSpotsOf(city);
+  if (!fallback) return false;
+  POIS[city] = fallback;
+  SPOT_SOURCE[city] = 'builtin';
+  invalidateAIPlan();
+  if (state.to.name === city && state.step >= 3) {
+    renderSpots();
+    showSpots(true);
+  }
+  return true;
+}
+
+// 免费地理编码：OpenStreetMap Nominatim（serve.py 代理 + 缓存 + 限速），失败由 LLM 估算坐标兜底
+async function geocodeAiSpots(city, spots) {
+  const out = new Map();
+  for (const s of spots.slice(0, 12)) {
+    try {
+      const r = await fetch(`/api/free/places?q=${encodeURIComponent(s.name)}&city=${encodeURIComponent(city)}&limit=1`, { cache: 'no-store' });
+      const d = await r.json();
+      const hit = d && d.ok && Array.isArray(d.places) && d.places[0];
+      if (hit && Number.isFinite(Number(hit.lat)) && Number.isFinite(Number(hit.lng))) {
+        out.set(s.name, { lng: Number(hit.lng), lat: Number(hit.lat), src: 'nominatim' });
+      }
+    } catch (e) { /* 无定位时用 LLM 估算坐标 */ }
+  }
+  return out;
+}
+
+function renderGuide(phase) {
+  // 情报面板横幅：说明当前景点数据来源；预制攻略列表已移除（内置数据保留在问答检索里）
+  const banner = $('#guideBanner');
+  if (!banner) return;
+  const city = state.to.name;
+  if (phase === 'searching') {
+    banner.className = 'g-banner ai';
+    banner.textContent = '🔎 AI 正在联网搜索该城市的景点并定位坐标…';
+    return;
+  }
+  if (SPOT_SOURCE[city] === 'ai') {
+    banner.className = 'g-banner ai';
+    banner.innerHTML = `⚠ 以下景点由 AI 联网搜索生成（坐标为近似值），仅供参考，出行前自行核实。`
+      + ` <a href="#" id="fallbackBuiltin">回退内置数据</a>`;
+    const a = document.getElementById('fallbackBuiltin');
+    if (a) a.addEventListener('click', ev => {
+      ev.preventDefault();
+      if (restoreBuiltinSpots(city)) { renderGuide(); toast('已回退内置景点数据'); }
+      else toast('该城市没有内置数据');
+    });
+    return;
+  }
+  if (POI_RAW[city]) {
+    banner.className = 'g-banner';
+    banner.textContent = '当前展示内置景点数据（AI 搜索不可用时的回退）。点下方按钮用 AI 联网搜索最新景点。';
+  } else {
+    banner.className = 'g-banner ai';
+    banner.textContent = '该城市暂无内置景点数据。点下方按钮用 AI 联网搜索（需要已配置 AI 通道）。';
+  }
+}
+
+// 首次进入某城市的步骤③时自动触发 AI 搜索（默认数据源 = AI 实时搜索；
+// 有 24h 缓存直接用缓存；AI 不可用时静默跳过，展示内置数据作为回退）
+function maybeAiSearchSpots() {
+  const city = state.to.name;
+  if (aiSpotsBusy || SPOT_SOURCE[city] === 'ai') return;
   try {
-    const city = state.to.name;
-    $('#guideGen').textContent = AI.searchReady() ? '联网检索并生成中…' : '生成中…';
-    // 联网检索目的地攻略，让生成内容有真实依据
-    let webBlock = '';
-    let searchNote = '';
-    const sr = await tryWebSearch(`${city} 旅游攻略 美食 住宿 必玩`, 6);
-    if (sr.ok && sr.results.length) {
-      searchNote = `🔍 已联网检索 ${sr.results.length} 条网页（搜索源：${AI.searchProviderLabel(sr.provider)}）\n\n`;
-      webBlock = `\n\n网络检索结果（生成时可参考其中的真实区域/类型，但不要照抄具体店名和价格）：\n`
-        + sr.results.map((s, i) => `[${i + 1}] ${s.title}\n${s.snippet}\n来源：${s.url}`).join('\n\n');
+    const r = JSON.parse(localStorage.getItem(AI_SPOTS_LS(city)) || 'null');
+    if (r && Array.isArray(r.spots) && r.spots.length && Date.now() - r.at < AI_SPOTS_TTL) {
+      applyAiSpots(city, r.spots);   // 缓存直接应用（不打断用户）
+      renderGuide();
+      return;
     }
-    const messages = [
-      { role: 'system', content: '你是旅行攻略编辑。为目的地城市生成简明攻略 JSON：{"food":[{"t":"条目名","d":"两句话说明"}],"stay":[...],"tips":[...],"ideas":[{"t":"行程名","d":"按天一句话"}]}。food/stay/tips 各 3-4 条，ideas 1-2 条；内容基于你的公开常识与给定的网络检索结果，不要编造具体店名价格，用「区域/类型」表述；只输出 JSON。' },
-      { role: 'user', content: `目的地：${city}${webBlock}` },
-    ];
-    const r = await AI.chat(messages, { task: 'guide', temperature: 0.5, maxTokens: 1200 });
-    $('#guideGen').textContent = '让 AI 生成该城市攻略';
-    // 失败时用输出弹窗展示完整报错：toast 会截断模型下线等关键提示
-    if (!r.ok) return openAiOut(searchNote + '⚠ 攻略生成失败', r.error);
-    const data = AI.extractJSON(r.content);
-    if (!data || !data.food) return toast('AI 返回内容无法解析为攻略，请重试');
-    const srcTag = sr.ok && sr.results.length
-      ? `AI 生成 · 联网参考 ${sr.results.length} 个网页，仅供参考`
-      : 'AI 生成，仅供参考';
-    data.food = (data.food || []).map(i => ({ ...i, src: srcTag }));
-    data.stay = (data.stay || []).map(i => ({ ...i, src: srcTag }));
-    data.tips = (data.tips || []).map(i => ({ ...i, src: srcTag }));
-    data.ideas = (data.ideas || []).map(i => ({ ...i, src: srcTag }));
-    localStorage.setItem(GUIDE_LS(city), JSON.stringify(data));
+  } catch (e) { /* 缓存损坏当作没有 */ }
+  if (!AI.ready()) {
+    SPOT_SOURCE[city] = SPOT_SOURCE[city] || (POI_RAW[city] ? 'builtin' : 'none');
     renderGuide();
-    toast(`已生成「${city}」攻略（${sr.ok && sr.results.length ? '联网参考，' : ''}存本机缓存）`);
+    return;
+  }
+  aiSearchSpots(city, false).catch(() => {});
+}
+
+async function aiSearchSpots(city, force) {
+  if (aiSpotsBusy) return toast('AI 正在搜索景点，请稍候…');  if (!AI.ready()) {
+    toast('AI 通道未配置：先在「AI 设置」接入，才能联网搜索景点');
+    openAiSettings();
+    return;
+  }
+  const lsKey = AI_SPOTS_LS(city);
+  if (!force) {
+    const cached = (() => {
+      try {
+        const r = JSON.parse(localStorage.getItem(lsKey) || 'null');
+        return r && Array.isArray(r.spots) && r.spots.length ? r : null;
+      } catch (e) { return null; }
+    })();
+    if (cached && Date.now() - cached.at < AI_SPOTS_TTL) {
+      applyAiSpots(city, cached.spots);
+      renderGuide();
+      return;
+    }
+  }
+  aiSpotsBusy = true;
+  const seq = ++aiSpotsSeq;
+  const genBtn = $('#guideGen');
+  const oldText = genBtn ? genBtn.textContent : '';
+  if (genBtn) { genBtn.disabled = true; genBtn.textContent = '🔎 AI 搜索景点中…'; }
+  renderGuide('searching');
+  try {
+    // 1) 联网检索（不可用时优雅降级：让 LLM 凭公开常识给景点）
+    const sr = await tryWebSearch(`${city} 必去景点 旅游攻略`, 8);
+    const webBlock = sr.ok && sr.results.length
+      ? `\n\n网络检索结果（从中提取真实存在的景点，禁止编造检索结果与常识之外的地名）：\n`
+        + sr.results.map((s, i) => `[${i + 1}] ${s.title}\n${s.snippet}`).join('\n\n')
+      : '';
+    // 2) LLM 提取结构化景点 + 近似坐标（地理编码失败时的兜底）
+    const messages = [
+      { role: 'system', content: '你是景点数据编辑。从给定的网络检索结果中提取目的地真实景点，输出 JSON：'
+        + '{"spots":[{"name":"景点名","area":"所在区/商圈","desc":"一句话亮点","tier":"hot|value|niche|explore","ticket":门票数字（免费或不确定填0）,"suggest_min":建议游玩分钟数,"lng":经度估算,"lat":纬度估算}]}。'
+        + '要求：提取 8-14 个最值得去的景点，按 tier 归类（热门hot/性价比value/小众niche/待探索explore）；'
+        + 'lng/lat 给出你的近似估算值（中国境内坐标偏差可接受），不确定也要给合理值；只输出 JSON。' },
+      { role: 'user', content: `目的地城市：${city}${webBlock || '\n（本次没有网络检索结果，请基于你的公开常识给出该城市真实景点，禁止编造不存在的地名。）'}` },
+    ];
+    const r = await AI.chat(messages, { task: 'spots', temperature: 0.3, maxTokens: 1600 });
+    if (seq !== aiSpotsSeq) return;
+    if (!r.ok) throw new Error(r.error || 'AI 请求失败');
+    const data = AI.extractJSON(r.content);
+    const rawSpots = (data && Array.isArray(data.spots) ? data.spots : (Array.isArray(data) ? data : []))
+      .filter(s => s && s.name && String(s.name).trim());
+    if (!rawSpots.length) throw new Error('AI 未返回可用景点');
+    // 3) 地理编码：Nominatim 免费 pinpoint，失败用 LLM 近似坐标兜底
+    const geo = await geocodeAiSpots(city, rawSpots);
+    if (seq !== aiSpotsSeq) return;
+    const spots = rawSpots.map(s => {
+      const g = geo.get(s.name) || {};
+      const lng = Number(g.lng ?? s.lng);
+      const lat = Number(g.lat ?? s.lat);
+      if (!Number.isFinite(lng) || !Number.isFinite(lat)) return null;
+      const tier = ['hot', 'value', 'niche', 'explore'].includes(s.tier) ? s.tier : 'explore';
+      return {
+        id: `ai-${city}-${String(s.name).trim()}`,
+        name: String(s.name).trim(),
+        lat, lng,
+        tier,
+        ticket: Number(s.ticket) || 0,
+        suggest_min: Math.max(30, Math.min(300, Number(s.suggest_min) || 90)),
+        satisfaction: 0.75,
+        note: `${String(s.desc || s.area || '').slice(0, 80)}`
+          + `（AI 检索 · ${g.src === 'nominatim' ? 'OSM 定位' : 'AI 估算坐标'}）`,
+        city,
+      };
+    }).filter(Boolean);
+    if (spots.length < 3) throw new Error(`有效景点过少（${spots.length} 个，坐标定位失败）`);
+    localStorage.setItem(lsKey, JSON.stringify({ at: Date.now(), spots }));
+    applyAiSpots(city, spots);
+    renderGuide();
+    toast(`AI 已搜索到 ${spots.length} 个景点（原内置数据保留为回退）`);
+  } catch (e) {
+    if (seq !== aiSpotsSeq) return;
+    renderGuide();
+    if (restoreBuiltinSpots(city)) {
+      toast(`AI 搜索失败，已回退内置景点数据：${String(e.message || e).slice(0, 60)}`);
+    } else {
+      toast(`AI 搜索失败：${String(e.message || e).slice(0, 80)}`);
+    }
   } finally {
-    aiEnd();
+    aiSpotsBusy = false;
+    if (genBtn) { genBtn.disabled = false; genBtn.textContent = '✨ AI 搜索当地景点（联网）'; }
   }
 }
 
@@ -3021,15 +3179,16 @@ async function aiExplain() {
 let aiPlanSeq = 0;  // 用户切走或重新编排后，丢弃在途 AI 结果
 
 const AI_PLAN_SYSTEM = [
-  '你是行程编排器，只负责把景点分配到每天并给出当天顺序，不要编造任何地点或 id。',
+  '你是行程编排器，负责把景点分配到每天并给出当天顺序，一次生成多个策略不同的候选方案，不要编造任何地点或 id。',
   '硬性规则：',
-  '1. 只能使用用户 JSON 里 spots 出现过的 id；每个 id 只能用一次；禁止新增 id 或景点名。',
+  '1. 只能使用用户 JSON 里 spots 出现过的 id；每个 id 在每个方案里最多用一次；禁止新增 id 或景点名。',
   '2. 按地理位置就近分组，同一天不要安排明显跨江/跨海、需要绕行很远的地点。',
   '3. 每天所有景点 play_min 之和，加上点间市内通勤时间，不要超过该天的 available_min；available_min 为 0 表示当天很晚才到，尽量不排景点。',
   '4. 同一天顺序要顺路，减少折返；需要预约、建议游玩时间长的热门景点优先放当天靠前位置。',
   '5. 景点排不下时宁可少排，也不要硬塞导致一天走不完。',
+  '6. 生成 2-3 个策略明显不同的方案（例如：省时直奔 / 经典平衡 / 小众深度），每个方案覆盖全部景点、结构一致。',
   '只输出 JSON，不要解释文字：',
-  '{"days":[{"day":1,"spot_ids":["id1","id2"],"reason":"一句话说明分天和顺序的理由"}]}',
+  '{"schemes":[{"name":"方案名（4字内，如 省时直奔）","desc":"一句话策略说明","days":[{"day":1,"spot_ids":["id1","id2"],"reason":"一句话说明分天和顺序的理由"}]}]}',
 ].join('\n');
 
 function aiPlanSignature() {
@@ -3071,46 +3230,64 @@ function invalidateAIPlan() {
     state.aiBusy = false;
     updateSchemeTabsBusy(false);
   }
-  if (!state.orders.ai && !state.aiPlan) { updateAIPlanBar(); return; }
-  state.orders.ai = null;
+  const hadAI = !!state.aiSchemes;
+  Object.keys(state.orders).filter(k => String(k).startsWith('ai-')).forEach(k => delete state.orders[k]);
+  state.aiSchemes = null;
   state.aiPlan = null;
-  if (state.scheme === 'ai') {
-    state.scheme = 'recommended';
-    $$('#schemeTabs button').forEach(b => b.classList.toggle('on', b.dataset.scheme === 'recommended'));
+  state.confirmedScheme = null;
+  renderSchemeTabs();
+  if (String(state.scheme).startsWith('ai') || hadAI) {
+    if (!getOrder().flat().length) applyScheme('recommended');
   }
   updateAIPlanBar();
+}
+
+function getAiScheme(key) {
+  return (state.aiSchemes || []).find(s => s.key === key) || null;
+}
+
+// 方案 tabs：本地两个 + AI 候选（动态）+ 自定义；「AI 编排」常驻作为生成入口
+function renderSchemeTabs() {
+  const tabs = $('#schemeTabs');
+  if (!tabs) return;
+  const btn = (key, label, dis) =>
+    `<button data-scheme="${key}"${state.scheme === key ? ' class="on"' : ''}${dis ? ' disabled' : ''}>${label}</button>`;
+  let h = btn('recommended', '🤖 系统推荐 · 最省时') + btn('popular', '🔥 大众经典路线');
+  (state.aiSchemes || []).forEach(s => { h += btn(s.key, `✨ AI·${esc(s.label)}`); });
+  h += btn('ai-gen', state.aiBusy ? '✨ 编排中…' : '✨ AI 编排', state.aiBusy);
+  h += btn('custom', '✍️ 自定义安排');
+  tabs.innerHTML = h;
 }
 
 function updateAIPlanBar() {
   const bar = $('#aiPlanBar'), status = $('#aiPlanStatus');
   if (!bar) return;
-  const show = state.aiBusy || (state.scheme === 'ai' && !!state.orders.ai);
+  const cur = getAiScheme(state.scheme);
+  const show = state.aiBusy || !!cur;
   bar.classList.toggle('hidden', !show);
   if (!show || !status) return;
-  const p = state.aiPlan;
   if (state.aiBusy) {
-    status.textContent = '✨ AI 正在编排景点与每天的先后顺序，请稍候…';
-  } else if (p) {
-    status.textContent = `✨ ${p.model || 'AI'} 编排完成`
-      + (p.dropped ? ` · 忽略 ${p.dropped} 个重复/无效项` : '')
-      + (p.moved ? ` · 自动平衡 ${p.moved} 个超出时间窗的景点` : '')
-      + '。每天可单独调整交通方式。';
+    status.textContent = '✨ AI 正在生成 2-3 个编排方案（省时 / 经典 / 深度等不同策略），请稍候…';
+  } else if (cur) {
+    status.textContent = `✨ ${((state.aiPlan && state.aiPlan.model) || 'AI')} 已生成 ${(state.aiSchemes || []).length} 个方案`
+      + ` · 当前「${cur.label}」${cur.desc ? '：' + cur.desc : ''}`
+      + (cur.dropped ? ` · 忽略 ${cur.dropped} 个重复/无效项` : '')
+      + (cur.moved ? ` · 自动平衡 ${cur.moved} 个超出时间窗的景点` : '');
   }
 }
 
 function updateSchemeTabsBusy(busy) {
-  const tab = $('#schemeTabs button[data-scheme="ai"]');
-  if (tab) {
-    tab.disabled = busy;
-    tab.classList.toggle('busy', busy);
-    tab.textContent = busy ? '✨ 编排中…' : '✨ AI 编排';
-  }
+  $$('#schemeTabs button[data-scheme^="ai"]').forEach(b => {
+    b.disabled = busy;
+    if (busy) b.textContent = '✨ 编排中…';
+  });
+  if (!busy) renderSchemeTabs();  // 恢复各 AI 方案的原始标签与选中态
   const again = $('#btnAiReplan');
   if (again) again.disabled = busy;
 }
 
-// 把 AI 输出收敛成合法方案：白名单 + 去重 + 漏排补位 + 每日容量平衡
-function normalizeAIPlan(raw) {
+// 把单个方案的 AI 输出收敛成合法分天：白名单 + 去重 + 漏排补位 + 每日容量平衡
+function normalizeAIPlanDays(rawDays) {
   const D = state.days.length;
   const valid = new Set(state.selected);
   const nameToId = new Map(state.selected.map(id => [POIMAP[id].name, id]));
@@ -3123,7 +3300,7 @@ function normalizeAIPlan(raw) {
   const reasons = Array(D).fill('');
   const seen = new Set();
   let dropped = 0;
-  const rows = raw && (Array.isArray(raw.days) ? raw.days : (Array.isArray(raw) ? raw : null));
+  const rows = rawDays && (Array.isArray(rawDays) ? rawDays : null);
   if (!rows) return null;
   rows.forEach((row, idx) => {
     if (!row || typeof row !== 'object') return;
@@ -3146,6 +3323,34 @@ function normalizeAIPlan(raw) {
   }
   const moved = rebalanceAIPlan(days);
   return { days, reasons, dropped, moved };
+}
+
+// 把多方案输出收敛成候选列表（兼容单方案旧格式），最多 3 个
+function normalizeAISchemes(raw) {
+  const rows = raw && (Array.isArray(raw.schemes)
+    ? raw.schemes
+    : (Array.isArray(raw.days) ? [{ name: 'AI 编排', days: raw.days }] : (Array.isArray(raw) ? raw : null)));
+  if (!rows) return null;
+  const out = [];
+  rows.slice(0, 3).forEach((s, i) => {
+    if (!s || typeof s !== 'object') return;
+    const plan = normalizeAIPlanDays(s.days || s);
+    if (!plan || !plan.days.flat().length) return;
+    out.push({
+      key: `ai-${i}`,
+      label: String(s.name || `AI 方案${i + 1}`).slice(0, 10),
+      desc: String(s.desc || '').slice(0, 60),
+      days: plan.days, reasons: plan.reasons, dropped: plan.dropped, moved: plan.moved,
+    });
+  });
+  // 多方案可能重复：按分天结果去重
+  const seenSig = new Set();
+  return out.filter(s => {
+    const sig = JSON.stringify(s.days);
+    if (seenSig.has(sig)) return false;
+    seenSig.add(sig);
+    return true;
+  });
 }
 
 // 某天排爆时，把当天最后一站挪到还有余量的最近一天；保留 AI 给出的组内顺序
@@ -3183,8 +3388,9 @@ async function generateAIPlan(force) {
   if (state.aiBusy) return;
   if (!state.selected.length) return toast('请先在步骤③选择景点');
   const sig = aiPlanSignature();
-  if (!force && state.orders.ai && state.aiPlan && state.aiPlan.sig === sig) {
-    applyScheme('ai');
+  if (!force && state.aiSchemes && state.aiPlan && state.aiPlan.sig === sig) {
+    const cur = state.aiSchemes.find(s => s.key === state.scheme);
+    applyScheme(cur ? cur.key : state.aiSchemes[0].key);
     return;
   }
   if (AI.cfg.provider === 'demo' || !AI.ready()) {
@@ -3204,7 +3410,7 @@ async function generateAIPlan(force) {
   ];
   let r;
   try {
-    r = await AI.chat(messages, { task: 'plan', temperature: 0.2, maxTokens: 1800 });
+    r = await AI.chat(messages, { task: 'plan', temperature: 0.2, maxTokens: 2400 });
   } catch (e) {
     r = { ok: false, error: (e && e.message) || '请求失败' };
   }
@@ -3214,27 +3420,23 @@ async function generateAIPlan(force) {
   if (!r || !r.ok) {
     updateAIPlanBar();
     toast('AI 编排失败：' + ((r && r.error) || '未知错误'));
-    if (!state.orders.ai) applyScheme('recommended');
+    if (!state.aiSchemes) applyScheme('recommended');
     return;
   }
-  const plan = normalizeAIPlan(AI.extractJSON(r.content));
-  if (!plan || !plan.days.flat().length) {
+  const schemes = normalizeAISchemes(AI.extractJSON(r.content));
+  if (!schemes || !schemes.length) {
     updateAIPlanBar();
     toast('AI 回复里没有可用的编排 JSON，已保留本地方案');
-    if (!state.orders.ai) applyScheme('recommended');
+    if (!state.aiSchemes) applyScheme('recommended');
     return;
   }
-  state.orders.ai = plan.days;
-  state.aiPlan = {
-    ...plan, sig, model: AI.cfg.model || AI.cfg.provider, at: Date.now(),
-  };
-  state.scheme = 'ai';
-  $$('#schemeTabs button').forEach(b => b.classList.toggle('on', b.dataset.scheme === 'ai'));
-  initModes();
-  renderTimeline();
-  drawRoute(true);
+  state.aiSchemes = schemes;
+  schemes.forEach(s => { state.orders[s.key] = s.days; });
+  state.aiPlan = { sig, model: AI.cfg.model || AI.cfg.provider, at: Date.now() };
+  renderSchemeTabs();
+  applyScheme(schemes[0].key);
   updateAIPlanBar();
-  toast('AI 编排完成，已按 AI 分天结果重算路线与通勤方式');
+  toast(`AI 已生成 ${schemes.length} 个编排方案（地图为直线预览），选定后点「采用此方案并算路」`);
 }
 
 /* --- 一句话生成行程 --- */
@@ -3347,7 +3549,12 @@ function gotoStep(n) {
     '点任意线段或图钉，可在百度地图中打开导航',
   ][n - 1];
   if (n === 2) showIntercity();
-  if (n === 3) showSpots(false);
+  if (n === 3) {
+    showSpots(false);
+    renderGuide();
+    // 默认数据源 = AI 实时搜索：首次进入该城市且无缓存时自动触发；AI 不可用则静默回退内置数据
+    maybeAiSearchSpots();
+  }
   if (n >= 4) drawRoute(true);
   else hideRouteLoading();
   // 手机端每个步骤地图高度不同，切步骤后让 Leaflet / 百度 / 高德重算尺寸
@@ -3398,8 +3605,9 @@ function doQuery() {
 }
 
 function applyScheme(name) {
-  if (name === 'ai') {
-    const fresh = state.orders.ai && state.aiPlan && state.aiPlan.sig === aiPlanSignature();
+  if (String(name).startsWith('ai-')) {
+    const scheme = getAiScheme(name);
+    const fresh = scheme && state.aiPlan && state.aiPlan.sig === aiPlanSignature();
     if (!fresh) {
       generateAIPlan(true).catch(err => toast(`AI 编排失败：${err && err.message ? err.message : err}`));
       return;  // 等 AI 返回后再切到 AI 方案，失败时保留原来的本地方案
@@ -3413,9 +3621,11 @@ function applyScheme(name) {
   }
   state.scheme = name;
   $$('#schemeTabs button').forEach(b => b.classList.toggle('on', b.dataset.scheme === name));
+  // 切换方案回到直线预览阶段：用户点「采用此方案并算路」后才调用地图 API 算路
+  state.routeConfirmed = state.confirmedScheme === name;
   initModes();
   renderTimeline();
-  drawRoute(true);
+  drawRoute(true, !state.routeConfirmed);
   updateAIPlanBar();
 }
 
@@ -3808,7 +4018,20 @@ function bind() {
   // 步骤 4
   $('#schemeTabs').addEventListener('click', e => {
     const b = e.target.closest('button[data-scheme]');
-    if (b && !b.disabled) applyScheme(b.dataset.scheme);
+    if (!b || b.disabled) return;
+    if (b.dataset.scheme === 'ai-gen') {  // 常驻入口：生成（或重看）AI 多方案
+      generateAIPlan(true).catch(err => toast(`AI 编排失败：${err && err.message ? err.message : err}`));
+      return;
+    }
+    applyScheme(b.dataset.scheme);
+  });
+  $('#btnConfirmRoute').addEventListener('click', () => {
+    if (!state.scheme) return;
+    state.confirmedScheme = state.scheme;
+    state.routeConfirmed = true;
+    hideRouteConfirmBar();
+    drawRoute(false);
+    toast('已按当前方案调用地图 API 计算实际路线');
   });
   $('#btnAiReplan').addEventListener('click', () => {
     generateAIPlan(true).catch(err => toast(`AI 编排失败：${err && err.message ? err.message : err}`));
@@ -4006,20 +4229,8 @@ function bind() {
     });
   });
 
-  // 步骤 3：目的地情报
-  $('#btnGuide').addEventListener('click', () => {
-    const p = $('#guidePanel');
-    p.classList.toggle('hidden');
-    if (!p.classList.contains('hidden')) renderGuide();
-  });
-  $('#guideTabs').addEventListener('click', e => {
-    const b = e.target.closest('button[data-gtab]');
-    if (!b) return;
-    state.guideTab = b.dataset.gtab;
-    renderGuide();
-  });
-  $('#guideSearch').addEventListener('input', renderGuide);
-  $('#guideGen').addEventListener('click', aiGenGuide);
+  // 步骤 3：情报面板默认展示（AI 搜索景点 + 问答），不再需要开关
+  $('#guideGen').addEventListener('click', () => aiSearchSpots(state.to.name, true));
   $('#btnGuideAsk').addEventListener('click', guideAsk);
   $('#guideQ').addEventListener('keydown', e => { if (e.key === 'Enter') guideAsk(); });
 
@@ -4155,6 +4366,7 @@ function initProviderSwitch() {
 /* ================= 启动 ================= */
 
 bind();
+renderSchemeTabs();
 initProviderSwitch();
 gotoStep(1);
 updateAiBadge();
